@@ -1,0 +1,80 @@
+[package]
+name = "drone-sim"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["DroneSim Team"]
+description = "3D Drone Flight Simulator with LLM Integration and Evaluation Framework"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# 3D Engine
+bevy = { version = "0.14", features = ["dynamic_linking"] }
+bevy_egui = "0.29"
+
+# Async & Runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP Client for LLM APIs
+reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# GPS / Geo
+geo = "0.28"
+geographiclib-rs = "0.2"
+
+# OSM (optional - requires protoc)
+# osmpbfreader = "0.16"
+
+# Math
+nalgebra = "0.33"
+parry3d = "0.16"
+fastrand = "2.4"
+
+# Image processing for visual LLM
+image = { version = "0.25", features = ["png", "jpeg"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+dotenvy = "0.15"
+crossbeam-channel = "0.5"
+
+# UUID generation
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Local LLM (optional - uses llama.cpp)
+# llama-cpp-2 = { path = "../llama-cpp-rs/llama-cpp-2", optional = true }
+
+[features]
+default = ["llm-local"]
+llm-local = []
+llm-api = []
+
+# Enable a small amount of optimization in debug mode
+[profile.dev]
+opt-level = 1
+
+# Enable high optimizations for dependencies in debug builds
+[profile.dev.package."*"]
+opt-level = 3
+
+[[bin]]
+name = "drone-sim"
+path = "src/main.rs"

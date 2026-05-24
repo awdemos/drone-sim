@@ -1,0 +1,46 @@
+[window]
+title = "Drone Flight Simulator"
+width = 1600
+height = 900
+
+[world]
+origin_lat = 37.7749
+origin_lon = -122.4194
+terrain_size_m = 2000.0
+terrain_resolution = 256
+max_building_height = 30.0
+procedural_vegetation = true
+
+[drone]
+spawn_count = 2
+spawn_altitude_agl = 10.0
+default_drone_type = "MavicStyle"
+per_drone_types = []
+# user_body_color = [0.8, 0.2, 0.2]
+# user_arm_color = [0.3, 0.3, 0.3]
+
+[llm]
+enabled = true
+# Provider: ollama | openai | moonshot | kimi | demo
+provider = "demo"
+model = "llava:13b"
+api_url = "http://localhost:11434/api/generate"
+# The simulator auto-reads API keys from env vars:
+#   MOONSHOT_API_KEY  (for moonshot / kimi)
+#   KIMI_API_KEY      (alternative for kimi)
+#   OPENAI_API_KEY    (for openai)
+# You can also hardcode it below (not recommended for committed configs):
+# api_key = "sk-..."
+max_tokens = 512
+temperature = 0.7
+decision_interval_secs = 2.0
+visual_mode = true
+system_prompt = """You are the AI pilot of a quadcopter drone. You receive visual input from the drone camera and telemetry data. Respond with a JSON object containing: 'action' (one of: hover, move_forward, move_back, move_left, move_right, ascend, descend, rotate_cw, rotate_ccw, land), 'reasoning' (brief explanation), 'duration_secs' (how long to execute the action)."""
+
+[eval]
+enabled = true
+output_dir = "./traces"
+capture_frames = false
+capture_interval_secs = 1.0
+capture_reasoning = true
+max_trace_size_mb = 100

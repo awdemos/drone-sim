@@ -1,0 +1,10 @@
+{
+  "name": "City Survey Mission",
+  "waypoints": [
+    {"latitude": 37.7749, "longitude": -122.4194, "altitude_agl": 15.0, "hold_time_secs": 2.0},
+    {"latitude": 37.7755, "longitude": -122.4190, "altitude_agl": 20.0, "hold_time_secs": 0.0},
+    {"latitude": 37.7760, "longitude": -122.4185, "altitude_agl": 20.0, "hold_time_secs": 0.0},
+    {"latitude": 37.7765, "longitude": -122.4180, "altitude_agl": 15.0, "hold_time_secs": 5.0}
+  ],
+  "loop_mission": false
+}

@@ -1,0 +1,12 @@
+/target/
+/Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+/traces/
+/reasoning_export.json
+/config/sim.local.toml
+.env
+.desloppify/
+/data/tiles/

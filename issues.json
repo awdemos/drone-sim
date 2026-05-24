@@ -1,0 +1,1322 @@
+{
+  "issues": [
+    {
+      "dimension": "test_strategy",
+      "identifier": "untested_physics",
+      "summary": "Physics simulation completely untested",
+      "related_files": [
+        "src/drone/physics.rs"
+      ],
+      "evidence": [
+        "289 LOC of physics logic including gravity, thrust, drag, angular velocity, battery drain, terrain collision, building collision, and damage calculation",
+        "No #[cfg(test)] module exists in the file",
+        "Critical logic like NaN guards, damage thresholds (DAMAGE_MINOR_THRESHOLD=3.0, DAMAGE_MAJOR=8.0, DAMAGE_CRITICAL=15.0), and collision restitution are unverified"
+      ],
+      "suggestion": "Add unit tests for update_physics with mock Time and Query data. Test gravity application, thrust behavior, drag, battery drain, collision response, and damage calculation with known inputs/outputs.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "untested_controller",
+      "summary": "Flight controller with 8 modes completely untested",
+      "related_files": [
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "300 LOC implementing Manual, Stabilize, AltHold, Loiter, Guided, Auto, RTL, and Land flight modes",
+        "Waypoint navigation logic (Auto mode) including distance checks, waypoint advancement, and loop_mission handling is untested",
+        "Mode transition recording to TraceCollector is untested",
+        "No #[cfg(test)] module exists"
+      ],
+      "suggestion": "Extract pure controller logic (the match on flight_mode) into testable functions that take Drone state and return updated state. Add tests for each mode and waypoint transitions.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "untested_llm",
+      "summary": "LLM client and decision pipeline completely untested",
+      "related_files": [
+        "src/llm/client.rs",
+        "src/llm/mod.rs"
+      ],
+      "evidence": [
+        "363 LOC in client.rs: HTTP clients for Ollama, OpenAI, Moonshot/Kimi, demo mode, visual prompts",
+        "283 LOC in mod.rs: task spawning, polling, parse_llm_response, apply_llm_decisions",
+        "parse_llm_response extracts JSON from text with fallback defaults \u2014 this JSON parsing logic is untested",
+        "Demo mode uses SystemTime::now for seeding \u2014 behavior varies by time, making it non-deterministic and untestable as-is"
+      ],
+      "suggestion": "Add tests for parse_llm_response with various JSON formats, malformed responses, and missing fields. Test LlmConfig::resolve_api_key and resolve_api_url. Mock the HTTP client or extract pure request/response structs for testing.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "untested_config",
+      "summary": "Config loading and resolution logic completely untested",
+      "related_files": [
+        "src/core/config.rs"
+      ],
+      "evidence": [
+        "232 LOC including load_config (TOML parsing with fallback), save_default_config, LlmConfig::resolve_api_key, LlmConfig::resolve_api_url",
+        "resolve_api_key reads from environment variables \u2014 no tests verify the lookup priority or provider-specific env var mapping",
+        "resolve_api_url has provider default logic that is untested",
+        "load_config has path fallback logic (explicit path -> config/sim.toml -> default) that is untested"
+      ],
+      "suggestion": "Add tests for LlmConfig::resolve_api_url with different provider strings. Test load_config with temporary TOML files. Mock std::env::var for resolve_api_key testing.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "untested_terrain_osm",
+      "summary": "Terrain generation and OSM parsing completely untested",
+      "related_files": [
+        "src/world/terrain.rs",
+        "src/world/osm_loader.rs"
+      ],
+      "evidence": [
+        "135 LOC in terrain.rs: procedural terrain generation with simple_noise, flatten_factor, get_height_at_world interpolation",
+        "209 LOC in osm_loader.rs: Overpass JSON parsing, node resolution, building/road extraction, parse_osm_length, procedural city generation",
+        "get_height_at_world does coordinate clamping and integer indexing \u2014 edge cases at boundaries are untested",
+        "parse_osm_length strips unit suffixes \u2014 behavior with malformed input is untested"
+      ],
+      "suggestion": "Add tests for TerrainData::generate with known config values. Test get_height_at_world at boundary coordinates. Add tests for parse_osm_length with various input formats. Test load_osm_data with sample JSON.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "test_strategy",
+      "identifier": "untested_eval",
+      "summary": "Trace collection and metrics calculation completely untested",
+      "related_files": [
+        "src/eval/trace.rs",
+        "src/eval/metrics.rs"
+      ],
+      "evidence": [
+        "174 LOC in trace.rs: TraceCollector with Mutex-based event buffering, flush to JSON, frame capture, auto-save with size-based rotation",
+        "73 LOC in metrics.rs: MetricsCollector with distance, altitude, speed calculations; min_altitude_m has special-case logic for first frame",
+        "TraceCollector::flush acquires multiple mutexes in sequence \u2014 potential for deadlock or panic handling is untested",
+        "get_trace_size_estimate uses hardcoded byte estimates (256 bytes/event, 640*480*4 bytes/frame) \u2014 no test validates this heuristic"
+      ],
+      "suggestion": "Add tests for TraceCollector::record_event and flush with temporary directories. Test MetricsCollector::update_metrics with known drone states and verify distance, altitude range, and speed calculations.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "misnamed_guided_mode_handler",
+      "summary": "update_guided_mode handles all flight modes, not just Guided",
+      "related_files": [
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "Function name update_guided_mode suggests it only handles FlightMode::Guided",
+        "The match statement at lines 112-298 covers all 8 flight modes: Manual, Stabilize, AltHold, Loiter, Guided, Auto, Rtl, Land",
+        "The function is 220 lines of mode-specific control logic, with Guided being just one of 8 arms"
+      ],
+      "suggestion": "Rename to update_flight_mode or update_drone_control. If keeping the name, extract Guided-specific logic to a helper and call it from a general update_flight_mode function.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "naming_behavior_mismatch"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "update_camera_spawns_entities",
+      "summary": "update_camera_views spawns new camera entities, not just updates transforms",
+      "related_files": [
+        "src/drone/camera.rs"
+      ],
+      "evidence": [
+        "Function is named update_camera_views (lines 23-107)",
+        "The else branch at lines 45-106 spawns a new Camera3dBundle, DroneCamera component, and a viewport display PbrBundle when no camera exists for a drone",
+        "The mutation includes camera_map.insert, images.add, and commands.spawn - all significant side effects"
+      ],
+      "suggestion": "Split into two functions: ensure_drone_cameras (spawn/creation) and update_camera_views (transform update only). Or rename to update_or_spawn_camera_views.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "naming_behavior_mismatch"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "parse_osm_length_ignores_units",
+      "summary": "parse_osm_length claims to parse unit suffixes but ignores them entirely",
+      "related_files": [
+        "src/world/osm_loader.rs"
+      ],
+      "evidence": [
+        "Doc comment says: 'Parse an OSM tag value that may include a unit suffix (e.g., \"10 m\", \"3.5\", \"12m\")'",
+        "Implementation strips all non-numeric characters then parses as f32",
+        "'10 m' and '10 ft' both return Some(10.0) despite being different lengths",
+        "The function gives no indication that units are discarded"
+      ],
+      "suggestion": "Either rename to parse_osm_numeric_prefix and update docs, or implement actual unit conversion for 'm', 'ft', 'cm' etc.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "doc_behavior_divergence"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "resolve_api_url_surprising_override",
+      "summary": "resolve_api_url overrides custom URLs that match known defaults",
+      "related_files": [
+        "src/core/config.rs"
+      ],
+      "evidence": [
+        "Function doc: 'Resolve API URL with provider defaults'",
+        "Logic at lines 142-157: if self.api_url matches any hardcoded known default, it returns the current provider's default regardless of what the user configured",
+        "A user who intentionally sets api_url to 'http://localhost:11434/api/generate' for a non-ollama provider will have it silently overridden",
+        "The contract implies explicit URLs are respected, but the implementation treats matching-known-default as a signal to ignore the config"
+      ],
+      "suggestion": "Remove the is_known_default check. If api_url is non-empty, always return it. Only fall back to provider defaults when api_url is empty.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "doc_behavior_divergence"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "flush_resets_trace_identity",
+      "summary": "flush() resets trace_id and start_time, performing trace rotation not just flushing",
+      "related_files": [
+        "src/eval/trace.rs"
+      ],
+      "evidence": [
+        "Method name 'flush' conventionally means write buffered data to persistent storage without altering identity",
+        "Implementation at lines 106-144 writes events, then at lines 135-140 resets trace.events.clear(), trace.trace_id, and trace.start_time",
+        "auto_save_traces at lines 154-173 then creates a brand new TraceCollector, making the reset in flush() redundant and confusing",
+        "The dual reset means callers cannot reason about whether flush() preserves or destroys the current trace"
+      ],
+      "suggestion": "Remove the trace identity reset from flush(). Create a separate rotate_trace() method if trace rotation is needed. Fix auto_save_traces to not recreate the TraceCollector.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "naming_behavior_mismatch"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "spawn_terrain_inserts_resource",
+      "summary": "spawn_terrain and spawn_textured_terrain insert TerrainData resource as hidden side effect",
+      "related_files": [
+        "src/world/terrain.rs",
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "spawn_terrain at line 81 in terrain.rs: name implies mesh spawning only, but line 134 calls commands.insert_resource(terrain)",
+        "spawn_textured_terrain at line 289 in satellite_terrain.rs: name implies terrain mesh spawning, but lines 388-392 insert a TerrainData resource",
+        "TerrainData is also generated/inserted by insert_terrain_data (terrain.rs:72), creating ambiguity about which system owns resource insertion",
+        "Callers cannot tell from the name that these functions mutate the Commands resource registry"
+      ],
+      "suggestion": "Remove resource insertion from spawn functions. Ensure insert_terrain_data is the single source of TerrainData resource creation. Or rename functions to spawn_terrain_and_insert_data.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "naming_behavior_mismatch"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "record_event_silent_drop",
+      "summary": "record_event silently drops events on mutex poison instead of surfacing error",
+      "related_files": [
+        "src/eval/trace.rs"
+      ],
+      "evidence": [
+        "record_event at lines 85-93: if mutex lock fails (line 90: 'if let Ok(mut buffer) = ...'), the event is silently discarded with no logging or return value",
+        "The function signature is pub fn record_event(&mut self, event: SimEvent) with no Result return",
+        "In a Bevy system context, mutex poisoning is rare but possible; callers have no way to know events were lost",
+        "The contract implies events are reliably recorded when enabled=true"
+      ],
+      "suggestion": "Return a Result<(), TraceError> or at minimum log a warning when the lock fails and an event is dropped.",
+      "confidence": "medium",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "error_contract_violation"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "start_downloads_destructive_reset",
+      "summary": "start_satellite_tile_downloads destructively resets all state, not just starts downloads",
+      "related_files": [
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "Function name start_satellite_tile_downloads implies it only initiates downloads",
+        "Lines 157-158 clear tiles_needed and tiles_ready, line 156 sets terrain_spawned = false, line 159 increments generation",
+        "This destroys any in-progress tile state from a previous navigation",
+        "Callers (init_satellite_terrain, handle_reload_world) may not expect state destruction from a 'start' function"
+      ],
+      "suggestion": "Rename to reset_and_start_satellite_tile_downloads, or split into reset_satellite_state() and start_tile_downloads().",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "naming_behavior_mismatch"
+    },
+    {
+      "dimension": "contract_coherence",
+      "identifier": "handle_reload_world_full_reset",
+      "summary": "handle_reload_world performs complete world teardown, far more than handling an event",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "Function name handle_reload_world suggests light event handling",
+        "Implementation at lines 306-393: despawns all world entities recursively, despawns all drones, clears camera maps, frame buffers, trace events, reasoning chains, metrics, tile states",
+        "Regenerates terrain, reloads OSM data, respawns buildings, respawns drones, restarts satellite downloads",
+        "This is a full application state reset, not mere event handling"
+      ],
+      "suggestion": "Rename to reset_world_at_coordinates or rebuild_world. Extract the teardown logic into a clear reset_world_state function.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "naming_behavior_mismatch"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "llm_client_identical_match_arms",
+      "summary": "Identical match arms in LLM provider dispatch",
+      "related_files": [
+        "src/llm/client.rs"
+      ],
+      "evidence": [
+        "prompt() lines 46-49: 'ollama' => self.prompt_ollama(...).await, and _ => self.prompt_ollama(...).await execute identical code",
+        "prompt_visual() lines 81-84: same pattern with prompt_ollama_visual"
+      ],
+      "suggestion": "Remove the redundant _ fallback and let 'ollama' handle the default, or merge them as 'ollama' | _ => ...",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "osm_loader_identical_match_arms",
+      "summary": "Identical match arms in OSM road width classification",
+      "related_files": [
+        "src/world/osm_loader.rs"
+      ],
+      "evidence": [
+        "Lines 135-142: 'residential' => 5.0 and _ => 5.0 have identical bodies"
+      ],
+      "suggestion": "Remove the 'residential' arm since it is already covered by the catch-all _ arm",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "main_unreachable_unwrap_default",
+      "summary": "Unreachable unwrap_or_default() on provably-Ok result",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "Lines 120, 123, 366, 368: load_osm_data(Path::new(''), &geo).unwrap_or_default() \u2014 load_osm_data always returns Ok when the path does not exist, because it falls back to generate_procedural_city()",
+        "The unwrap_or_default() branch is dead code and misleads readers into thinking failure is possible here"
+      ],
+      "suggestion": "Remove .unwrap_or_default() from the fallback calls; the function already guarantees Ok for nonexistent paths",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "llm_client_unused_async",
+      "summary": "Async function with no await expressions",
+      "related_files": [
+        "src/llm/client.rs"
+      ],
+      "evidence": [
+        "Line 53: async fn prompt_demo(&self, _user: &str) -> Result<LlmResponse> has no .await inside its body"
+      ],
+      "suggestion": "Either make it a regular fn and wrap the call site in std::future::ready, or add a comment explaining why it must remain async for interface consistency",
+      "confidence": "medium",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "metrics_fragile_first_frame_sentinel",
+      "summary": "Fragile timing-based first-frame detection for min altitude initialization",
+      "related_files": [
+        "src/eval/metrics.rs"
+      ],
+      "evidence": [
+        "Lines 62-66: if m.min_altitude_m == 0.0 && m.flight_time_secs <= dt { m.min_altitude_m = alt; } uses elapsed time as a proxy for 'first frame'",
+        "This is clever but not obvious; it breaks if dt ever exceeds flight_time_secs (e.g. after a pause) and the sentinel 0.0 is ambiguous with actual zero altitude"
+      ],
+      "suggestion": "Add an explicit initialized: bool field to DroneMetrics, or initialize min_altitude_m to f64::INFINITY and use .min() unconditionally",
+      "confidence": "medium",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "controller_redundant_option_unwrap",
+      "summary": "Redundant Option unwrapping before existence check",
+      "related_files": [
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "Lines 203-204: mission_len and loop_mission are computed via map(...).unwrap_or(...) before the if let Some(mission) block",
+        "Inside the block (line 206+), mission is already available, so mission.waypoints.len() and mission.loop_mission could be used directly"
+      ],
+      "suggestion": "Move the computation inside the if let block and use the bound mission variable directly",
+      "confidence": "medium",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "logic_clarity",
+      "identifier": "visual_noop_drop",
+      "summary": "No-op drop on type without Drop implementation",
+      "related_files": [
+        "src/drone/visual.rs"
+      ],
+      "evidence": [
+        "Line 154: drop(slice); where slice is a wgpu BufferSlice that does not implement Drop, making the call a no-op"
+      ],
+      "suggestion": "Remove the drop(slice) line; it suggests cleanup is happening when it is not",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "hle_reload_orchestration_in_main",
+      "summary": "main.rs centralizes world-reload orchestration across all plugins via handle_reload_world",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "handle_reload_world takes 16 parameters and directly despawns entities from world, drone, and satellite_terrain subsystems",
+        "It clears internal resources: camera_map.map, frame_buffer.frames, trace.event_buffer, reasoning.active_chains, metrics.drone_metrics, terrain_state.tiles_needed, tile_state.tiles",
+        "It reloads OSM data, regenerates terrain, spawns buildings, spawns drones, and starts satellite tile downloads \u2014 all inline in main.rs",
+        "Any plugin that adds a new Resource or Entity type must also update handle_reload_world, creating ripple edits across the codebase"
+      ],
+      "suggestion": "Replace centralized orchestration with a ReloadWorldEvent that each plugin handles independently via its own cleanup/respawn systems. WorldPlugin handles world entities and terrain, DronePlugin handles drones, LlmPlugin handles reasoning, EvalPlugin handles traces/metrics, UiPlugin handles tile state.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "hle_world_depends_on_ui",
+      "summary": "world/satellite_terrain.rs depends on ui::map_tiles for shared tile coordinate utilities",
+      "related_files": [
+        "src/world/satellite_terrain.rs",
+        "src/ui/map_tiles.rs"
+      ],
+      "evidence": [
+        "world/satellite_terrain.rs contains: use crate::ui::map_tiles::{lat_lon_to_pixel, TileKey};",
+        "The world module (environment generation) imports from the UI module (user interface), violating logical layer boundaries",
+        "map_tiles.rs contains both UI rendering (egui) and shared tile coordinate math, making its responsibility ambiguous"
+      ],
+      "suggestion": "Extract TileKey, lat_lon_to_pixel, and pixel_to_lat_lon into a shared module (e.g., core::map_tiles or world::tile_math) that both ui::map_tiles and world::satellite_terrain can depend on.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "high_level_elegance",
+      "identifier": "hle_types_catch_all",
+      "summary": "core/types.rs is a low-cohesion catch-all for all domain types",
+      "related_files": [
+        "src/core/types.rs"
+      ],
+      "evidence": [
+        "core/types.rs contains 12 domain types: DroneId, SimTimestamp, Pose, GpsCoord, EnuCoord, FlightMode, Waypoint, Mission, SensorSnapshot, SimEvent",
+        "Some types are drone-specific (Waypoint, Mission, SensorSnapshot) while others are evaluation-specific (SimEvent)",
+        "The module has 12 importers, making it a central dependency hub with low cohesion"
+      ],
+      "suggestion": "Move Waypoint and Mission to a drone::mission module, SimEvent to eval::events, and keep only truly shared primitives (DroneId, SimTimestamp, Pose, GpsCoord, EnuCoord, FlightMode) in core/types.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "llm_provider_stringly_typed",
+      "summary": "LlmConfig.provider is a String instead of an enum for a closed set of providers",
+      "related_files": [
+        "src/core/config.rs",
+        "src/llm/client.rs",
+        "src/llm/mod.rs",
+        "src/main.rs"
+      ],
+      "evidence": [
+        "LlmConfig.provider: String",
+        "resolve_api_url matches on self.provider.as_str() against \"ollama\" | \"openai\" | \"moonshot\" | \"kimi\"",
+        "main.rs matches provider.as_str() for API key warnings",
+        "LlmClient::prompt matches on provider string"
+      ],
+      "suggestion": "Define a LlmProvider enum with serde support and replace String throughout the LLM subsystem.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "llm_type_safety"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "llm_action_stringly_typed",
+      "summary": "LlmDecision.action is a String instead of an enum for a closed set of drone actions",
+      "related_files": [
+        "src/llm/reasoning.rs",
+        "src/llm/mod.rs"
+      ],
+      "evidence": [
+        "LlmDecision.action: String",
+        "apply_llm_decisions matches on decision.action.as_str() against fixed literals like \"move_forward\", \"hover\", \"land\""
+      ],
+      "suggestion": "Define a DroneAction enum and parse the LLM JSON response into it.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "llm_type_safety"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "reasoning_step_type_stringly_typed",
+      "summary": "ReasoningStep.step_type is a String for a closed set of step kinds",
+      "related_files": [
+        "src/llm/reasoning.rs"
+      ],
+      "evidence": [
+        "ReasoningStep.step_type: String with comment // \"observation\", \"thought\", \"action\", \"reflection\"",
+        "add_step is called with hard-coded \"observation\" and \"action\" strings in llm/mod.rs"
+      ],
+      "suggestion": "Replace String with a StepType enum.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "llm_type_safety"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "duplicate_usage_struct",
+      "summary": "llm/client.rs defines a local Usage struct inside prompt_openai that duplicates the public Usage struct",
+      "related_files": [
+        "src/llm/client.rs"
+      ],
+      "evidence": [
+        "Local Usage struct at lines 229-234 inside prompt_openai",
+        "Public Usage struct at lines 358-363 with identical fields",
+        "Mapping code manually copies fields from local to public type"
+      ],
+      "suggestion": "Remove the local Usage definition and use the public one directly, or derive Deserialize on the public struct.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "llm_type_safety"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "sim_timestamp_u128_truncation",
+      "summary": "SimTimestamp silently truncates u128 nanoseconds to u64",
+      "related_files": [
+        "src/core/types.rs"
+      ],
+      "evidence": [
+        "SimTimestamp::now uses duration.as_nanos() as u64",
+        "SimTimestamp::from_duration uses d.as_nanos() as u64"
+      ],
+      "suggestion": "Change SimTimestamp.nanos to u128 to avoid silent truncation, or use try_into() and handle overflow explicitly.",
+      "confidence": "medium",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "numeric_safety"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "llm_client_builder_error_swallowed",
+      "summary": "LlmClient::new discards reqwest::Client builder errors with unwrap_or_default()",
+      "related_files": [
+        "src/llm/client.rs"
+      ],
+      "evidence": [
+        "Client::builder().timeout(...).build().unwrap_or_default()"
+      ],
+      "suggestion": "Propagate the error via Result or use expect with a clear message so build failures are not silently ignored.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "error_handling"
+    },
+    {
+      "dimension": "type_safety",
+      "identifier": "untyped_llm_json_parsing",
+      "summary": "parse_llm_response indexes untyped serde_json::Value instead of deserializing into a typed struct",
+      "related_files": [
+        "src/llm/mod.rs"
+      ],
+      "evidence": [
+        "serde_json::from_str::<serde_json::Value>(json_str)",
+        "json[\"action\"].as_str().unwrap_or(\"hover\")",
+        "json[\"confidence\"].as_f64().unwrap_or(1.0) as f32"
+      ],
+      "suggestion": "Define a LlmResponsePayload struct and deserialize directly into it to catch shape mismatches at the type level.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "llm_type_safety"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "trace_flush_silent_swallow",
+      "summary": "TraceCollector::flush() returns anyhow::Result but silently ignores frame write failures",
+      "related_files": [
+        "src/eval/trace.rs"
+      ],
+      "evidence": [
+        "Line 126: let _ = fs::create_dir_all(&frames_dir); -- directory creation error swallowed",
+        "Line 131: let _ = fs::write(&frame_file, frame_json); -- frame write error swallowed inside a function returning Result"
+      ],
+      "suggestion": "Propagate frame write errors via the existing anyhow::Result return type, or at minimum log them with warn!/error! so callers know frames may be missing.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "silent_io_swallowing"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "tile_download_string_errors",
+      "summary": "Tile download functions use Result<T, String> instead of anyhow::Result, losing error context",
+      "related_files": [
+        "src/ui/map_tiles.rs",
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "ui/map_tiles.rs line 135: fn download_tile(...) -> Result<Vec<u8>, String>",
+        "world/satellite_terrain.rs line 113: fn download_tile_blocking(...) -> Result<Vec<u8>, String>",
+        "Both use format!(\"cache read: {e}\") which is a plain String, not chainable with ? in anyhow contexts"
+      ],
+      "suggestion": "Change both to anyhow::Result and use anyhow::Context for error messages (e.g., .context(\"failed to read cached tile\")?) so errors can propagate through ? and preserve chains.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "inconsistent_error_types"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "visual_channel_silent_drop",
+      "summary": "Frame capture channel sends are silently dropped on failure",
+      "related_files": [
+        "src/drone/visual.rs"
+      ],
+      "evidence": [
+        "Line 86: let _ = job_sender.sender.send(CaptureJob { ... }); -- frame job dropped silently if channel full/disconnected",
+        "Line 157: let _ = result_sender.sender.send(CaptureResult { ... }); -- captured frame dropped silently"
+      ],
+      "suggestion": "At minimum log send failures with warn!; better, handle the Result and consider backpressure (e.g., skip only when channel is full rather than on disconnect).",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "silent_io_swallowing"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "inconsistent_mutex_poison",
+      "summary": "Mutex poison handling is inconsistent across TraceCollector methods",
+      "related_files": [
+        "src/eval/trace.rs",
+        "src/main.rs"
+      ],
+      "evidence": [
+        "trace.rs line 108-109: flush() maps poison to anyhow::Error properly",
+        "trace.rs line 147-148: get_trace_size_estimate() uses .unwrap_or(0) on lock(), silently returning 0 on poison",
+        "main.rs line 341-343: handle_reload_world() uses if let Ok(mut buf) = trace.event_buffer.lock() -- silently skips clearing on poison"
+      ],
+      "suggestion": "Standardize on one approach: either all methods propagate poison as an error (preferred for a collector), or document why some silently degrade. For a debug/simulation tool, unwrap_or(0) on size estimate is arguably acceptable but should be documented.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "inconsistent_error_types"
+    },
+    {
+      "dimension": "error_consistency",
+      "identifier": "tile_cache_silent_failures",
+      "summary": "Tile cache directory creation and write failures are silently ignored",
+      "related_files": [
+        "src/ui/map_tiles.rs",
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "ui/map_tiles.rs lines 157-159: let _ = create_dir_all(parent); let _ = write(cache_path, bytes);",
+        "world/satellite_terrain.rs lines 133-135: identical silent swallow pattern"
+      ],
+      "suggestion": "Log cache write failures at debug! or warn! level. Cache is best-effort but invisible failures make debugging network issues harder.",
+      "confidence": "medium",
+      "impact_scope": "subsystem",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "silent_io_swallowing"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "misnamed_flight_mode_handler",
+      "summary": "update_guided_mode handles all flight modes, not just Guided",
+      "related_files": [
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "Function update_guided_mode at line 79 contains a match on drone.flight_mode covering Manual, Stabilize, AltHold, Loiter, Guided, Auto, RTL, and Land (lines 112-298)",
+        "The function name implies it only updates Guided mode, misleading developers searching for where other modes are handled"
+      ],
+      "suggestion": "Rename to update_flight_mode or update_drone_control, or split into mode-specific functions",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "misleading_unused_prefix_geo",
+      "summary": "_geo parameter has unused prefix but is actively used",
+      "related_files": [
+        "src/drone/physics.rs"
+      ],
+      "evidence": [
+        "Parameter _geo: Res<GeoReference> at line 26 has underscore prefix conventionally meaning 'unused'",
+        "_geo is actively used on lines 60 and 105: drone.gps = _geo.world_to_gps(drone.pose.position)"
+      ],
+      "suggestion": "Remove the underscore prefix and rename to geo",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "debug_prefix_on_user_feature",
+      "summary": "debug_navigate_hotkey is user-facing, not debug-only",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "Function debug_navigate_hotkey at line 395 sends ReloadWorldEvent when user presses 'N' key",
+        "The 'debug_' prefix suggests this is temporary or developer-only functionality, but it is a regular user-facing hotkey"
+      ],
+      "suggestion": "Rename to navigate_hotkey or default_location_hotkey",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "underscore_prefixed_config_fields",
+      "summary": "DroneCamera config fields use underscore prefix suggesting dead code",
+      "related_files": [
+        "src/drone/camera.rs"
+      ],
+      "evidence": [
+        "Fields _drone_id, _fov, _resolution on DroneCamera (lines 10-13) have underscore prefix",
+        "These fields intentionally store configuration data but the prefix makes them look like unused/dead fields"
+      ],
+      "suggestion": "Remove underscore prefixes and add allow(dead_code) at struct level, or implement accessor methods",
+      "confidence": "medium",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "naming_quality",
+      "identifier": "ms_suffix_ambiguity",
+      "summary": "ms suffix in speed/rate fields is ambiguous (milliseconds vs meters/second)",
+      "related_files": [
+        "src/core/config.rs",
+        "src/eval/metrics.rs"
+      ],
+      "evidence": [
+        "max_speed_ms, average_speed_ms, max_climb_rate_ms in DroneConfig and DroneMetrics",
+        "'ms' is the standard abbreviation for milliseconds, creating potential confusion with meters per second"
+      ],
+      "suggestion": "Use _m_per_s, _mps, or add doc comments explicitly clarifying meters/second",
+      "confidence": "medium",
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "map_panel_monolith",
+      "summary": "map_panel is a 256-line monolith mixing rendering, input, tiles, and overlays",
+      "related_files": [
+        "src/ui/map_tiles.rs"
+      ],
+      "evidence": [
+        "map_panel spans lines 296-599 (303 lines total, ~256 in the show closure)",
+        "Handles: provider selection, grid/label toggles, drag/scroll input, zoom math, visible tile computation, tile download spawning, tile drawing (Ready/Loading/Failed), grid drawing, drone overlay drawing, compass rose, mouse position label",
+        "Clippy flags: too_many_lines at 256/100"
+      ],
+      "suggestion": "Extract into focused helpers: handle_map_input, spawn_missing_tiles, draw_tiles, draw_drones_on_map, draw_overlays. Each should take only the state it needs.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "update_guided_mode_duplication",
+      "summary": "update_guided_mode duplicates control logic across flight mode arms",
+      "related_files": [
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "Function is 183 lines with a large match over FlightMode (clippy: too_many_lines 183/100)",
+        "Stabilize, AltHold, Loiter, Guided, Auto, and RTL arms all contain nearly identical thrust/attitude PID-like logic: compute target_vel, vel_error, accel, set thrust = 0.45 + accel.y * 0.1, clamp, then compute angular_thrust from pitch/roll error",
+        "The is_selected guard is repeated in Manual, Stabilize, AltHold, and Guided arms"
+      ],
+      "suggestion": "Extract a compute_attitude_control(drone, target_vel, yaw_rate) helper that returns (thrust, angular_thrust). Data-drive mode-specific parameters (target_alt, target_vel source, yaw_input) into a small config table. This collapses ~120 lines of duplicated logic into ~20.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "llm_client_near_duplicates",
+      "summary": "Near-duplicate LLM prompt functions with only image field differing",
+      "related_files": [
+        "src/llm/client.rs"
+      ],
+      "evidence": [
+        "prompt_ollama (lines 87-140) and prompt_ollama_visual (lines 143-196) are 92% identical per mechanical scan",
+        "Both define identical local Request/Options/Response structs, build the same client.post chain, and parse the same response shape \u2014 the only difference is images: vec![image_base64.into()] vs no images field",
+        "prompt_openai and prompt_openai_visual share the same pattern"
+      ],
+      "suggestion": "Merge each pair into a single function with an optional images: Option<Vec<String>> parameter. Extract the local structs to module level so they are defined once. This removes ~90 lines of duplication.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "handle_reload_world_wide_params",
+      "summary": "handle_reload_world accepts 16 parameters \u2014 an unwieldy parameter bag",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "Function signature spans lines 306-323 with 16 parameters",
+        "Clippy flags: too_many_arguments at 16/7",
+        "Parameters include: 3x Query<Entity>, 5x ResMut, 1x Res, plus individual state resources",
+        "The function's job is 'despawn everything and reload world' but it pulls in every subsystem's state manually"
+      ],
+      "suggestion": "Introduce a WorldReloadContext struct that holds the commands, mesh/material assets, and a despawn helper. Group related mutable state (camera_map, frame_buffer, trace, reasoning, metrics) into a ReloadState bundle, or use a closure to capture repeated ResMut patterns.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "simple_noise_duplication",
+      "summary": "simple_noise and terrain generation logic duplicated across world modules",
+      "related_files": [
+        "src/world/terrain.rs",
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "simple_noise function is identical in both files: same hash constants, same fract-based logic",
+        "Terrain generation loop (4-octave noise + center flattening) appears in both TerrainData::generate and spawn_textured_terrain",
+        "Mechanical scan flags boilerplate_duplication between the two files with 7-19 line matching windows"
+      ],
+      "suggestion": "Extract simple_noise and generate_height_field to a shared world/terrain_gen.rs module. Both TerrainData::generate and spawn_textured_terrain should call the shared helper.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "apply_llm_decisions_string_match",
+      "summary": "apply_llm_decisions uses a large string match with nearly identical arms",
+      "related_files": [
+        "src/llm/mod.rs"
+      ],
+      "evidence": [
+        "40-line match on decision.action.as_str() with ~10 arms",
+        "Most arms follow the pattern: compute direction vector from orientation, multiply by 5.0, assign to target_velocity",
+        "Only direction (Z, -Z, X, -X, Y) and field (target_velocity vs angular_thrust.y) vary across arms"
+      ],
+      "suggestion": "Replace the match with a lookup: define a static map from action string to (axis, sign, speed, target_field). Or better, parse the action into an Action enum with a single apply(drone) method. This collapses ~35 lines to ~10.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "low_level_elegance",
+      "identifier": "spawn_textured_terrain_wide_params",
+      "summary": "spawn_textured_terrain has 11 parameters",
+      "related_files": [
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "Function signature at line 289 has 11 parameters: commands, meshes, materials, config, geo, zoom, min_tx, min_ty, atlas_tiles_x, atlas_tiles_y, texture_handle",
+        "Clippy flags: too_many_arguments at 11/7 and 8/7"
+      ],
+      "suggestion": "Group zoom, min_tx, min_ty, atlas_tiles_x, atlas_tiles_y into a TileAtlasParams struct, or capture them from SatelliteTerrainState which already holds these values.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "reload_orchestrator_god_function",
+      "summary": "handle_reload_world in main.rs is a god orchestrator that directly manipulates resources from 6+ modules",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "handle_reload_world (lines 306-393) takes 16 parameters spanning WorldEntity, Drone, SatelliteTileTask, DroneCameraMap, VisualFrameBuffer, TraceCollector, ReasoningTrace, MetricsCollector, SatelliteTerrainState, MapTileState, WorldConfig, DroneConfig",
+        "It directly clears internal state of camera_map.map, frame_buffer.frames, trace.event_buffer, reasoning.active_chains, metrics.drone_metrics, terrain_state.tiles_needed, tile_state.tiles",
+        "It calls spawn_buildings_and_roads_impl from world/buildings, spawn_drones_impl from drone/mod, and start_satellite_tile_downloads from world/satellite_terrain",
+        "The function mixes entity cleanup, resource reset, config mutation, data reloading, and respawning logic in one 90-line block"
+      ],
+      "suggestion": "Extract a WorldReloadCoordinator resource/service in a new module (e.g., core/reload.rs) that owns the reload protocol. Define a ReloadPhase enum and have each module register a reload handler via a trait or plugin callback. The coordinator should not reach into module internals - it should send events or call module-provided cleanup functions.",
+      "confidence": "high",
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "orchestration_entropy"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "world_ui_dependency_inversion",
+      "summary": "world/satellite_terrain.rs imports from ui::map_tiles, violating layer separation",
+      "related_files": [
+        "src/world/satellite_terrain.rs",
+        "src/ui/map_tiles.rs"
+      ],
+      "evidence": [
+        "Line 9: use crate::ui::map_tiles::{lat_lon_to_pixel, TileKey};",
+        "compute_tile_coverage calls lat_lon_to_pixel (line 87) and uses TileKey (line 164)",
+        "This makes the world/terrain layer depend on the ui/ layer, which should be a downstream consumer"
+      ],
+      "suggestion": "Move lat_lon_to_pixel, pixel_to_lat_lon, and TileKey to core/gps.rs or a new core/tiles.rs module. Both ui/map_tiles.rs and world/satellite_terrain.rs should import from core. TileKey is a coordinate concept, not a UI concept.",
+      "confidence": "high",
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "dependency_direction_violation"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "terrain_generation_duplicated",
+      "summary": "Terrain height generation logic is duplicated between world/terrain.rs and world/satellite_terrain.rs",
+      "related_files": [
+        "src/world/terrain.rs",
+        "src/world/satellite_terrain.rs"
+      ],
+      "evidence": [
+        "world/terrain.rs lines 66-69: simple_noise function",
+        "world/satellite_terrain.rs lines 395-398: identical simple_noise function",
+        "world/terrain.rs lines 18-43: height generation loop with 4 octaves, flatten_factor, h.max(0.0)",
+        "world/satellite_terrain.rs lines 310-329: identical height generation loop inside spawn_textured_terrain"
+      ],
+      "suggestion": "Extract terrain height generation into a shared function in world/terrain.rs (e.g., pub fn generate_heights(res: usize, size_m: f32) -> Vec<Vec<f32>>) and have both TerrainData::generate and satellite_terrain's spawn_textured_terrain call it. Keep the generation boundary in one obvious place.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "boundary_ownership_ambiguity"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "controller_guided_mode_overloaded",
+      "summary": "drone/controller.rs update_guided_mode couples flight mode logic to terrain, GPS, and trace at a single boundary",
+      "related_files": [
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "update_guided_mode is 300 lines handling 8 flight modes (Manual, Stabilize, AltHold, Loiter, Guided, Auto, Rtl, Land)",
+        "It takes Res<GeoReference>, Res<TerrainData>, and ResMut<TraceCollector> in addition to drone query",
+        "Auto mode (lines 201-251) directly queries mission waypoints, converts GPS to world via geo reference, queries terrain height, and records trace events",
+        "Land mode (lines 278-297) queries terrain height for ground level",
+        "The function is both a controller and a flight-mode state machine that reaches into world (terrain) and eval (trace) modules"
+      ],
+      "suggestion": "Split into two layers: a FlightModeComputer trait (or enum dispatch) that computes thrust/angular_thrust given mode and state, and a controller boundary function that calls the computer and handles side effects (trace, mode changes). Move GPS/terrain-dependent logic (Auto, Land) into a Navigation submodule that the controller calls as a collaborator, rather than inlining it.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "root_cause_cluster": "boundary_responsibility_creep"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "ui_coupled_to_controller_internals",
+      "summary": "ui/mod.rs system ordering depends on drone controller function symbols",
+      "related_files": [
+        "src/ui/mod.rs",
+        "src/drone/controller.rs"
+      ],
+      "evidence": [
+        "Line 4: use crate::drone::controller::{DroneInputState, process_input, update_guided_mode};",
+        "Line 45: .add_systems(Update, drone_panel.after(process_input).before(update_guided_mode))",
+        "The UI module should not need to import controller function symbols to schedule its own systems"
+      ],
+      "suggestion": "Define named system sets in the drone module (e.g., pub struct DroneControlSet) and use those for ordering instead of function symbols. The UI module can then reference DroneControlSet::Input and DroneControlSet::Guided without importing controller internals.",
+      "confidence": "high",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "scheduling_coupling"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "trace_config_boundary_fragile",
+      "summary": "eval/trace.rs auto_save_traces reconstructs EvalConfig from collector fields instead of receiving it",
+      "related_files": [
+        "src/eval/trace.rs"
+      ],
+      "evidence": [
+        "Lines 165-172: *trace_collector = TraceCollector::new(&EvalConfig { enabled: trace_collector.enabled, output_dir: trace_collector.output_dir.clone(), ... })",
+        "The system hardcodes capture_interval_secs: 1.0 and max_trace_size_mb from the collector, but the actual config might have different values",
+        "This creates an implicit boundary where TraceCollector must know how to reconstruct its own config, rather than receiving it from the config boundary"
+      ],
+      "suggestion": "Pass EvalConfig as a Res<EvalConfig> to auto_save_traces and use it directly when constructing the new TraceCollector. Remove the implicit config reconstruction.",
+      "confidence": "high",
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "config_boundary_leak"
+    },
+    {
+      "dimension": "mid_level_elegance",
+      "identifier": "config_decomposition_redundant",
+      "summary": "main.rs manually decomposes SimConfig into 5 individual resource inserts",
+      "related_files": [
+        "src/main.rs"
+      ],
+      "evidence": [
+        "Lines 133-139: .insert_resource(config.clone()).insert_resource(config.window.clone()).insert_resource(config.world.clone()).insert_resource(config.drone.clone()).insert_resource(config.llm.clone()).insert_resource(config.eval.clone())",
+        "This duplicates the SimConfig structure at the application boundary. Each subsystem already knows which config it needs."
+      ],
+      "suggestion": "Insert only SimConfig as a resource. Each plugin's build method can extract the sub-config it needs (e.g., app.insert_resource(config.drone.clone())) within the plugin. This keeps config handoffs localized to the modules that consume them.",
+      "confidence": "medium",
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "root_cause_cluster": "boundary_redundancy"
+    }
+  ],
+  "assessments": {
+    "test_strategy": 8.0,
+    "contract_coherence": 65.0,
+    "logic_clarity": 83.0,
+    "high_level_elegance": 75.0,
+    "type_safety": 72.0,
+    "error_consistency": 55.0,
+    "naming_quality": 80.0,
+    "low_level_elegance": 62.0,
+    "mid_level_elegance": 58.0
+  },
+  "dimension_notes": {
+    "test_strategy": {
+      "evidence": [
+        "Exactly 1 test exists in 5129 LOC across 24 production files: test_roundtrip in src/core/gps.rs",
+        "src/drone/physics.rs (289 LOC) \u2014 gravity, thrust, drag, collision, damage, battery drain \u2014 zero tests",
+        "src/drone/controller.rs (300 LOC) \u2014 8 flight modes (Manual, Stabilize, AltHold, Loiter, Guided, Auto, RTL, Land) \u2014 zero tests",
+        "src/llm/client.rs (363 LOC) + src/llm/mod.rs (283 LOC) \u2014 LLM HTTP client, response parsing, decision application \u2014 zero tests",
+        "src/core/config.rs (232 LOC) \u2014 config loading, API key resolution, URL resolution \u2014 zero tests",
+        "src/world/terrain.rs (135 LOC) + src/world/osm_loader.rs (209 LOC) \u2014 terrain generation, height lookup, OSM JSON parsing \u2014 zero tests",
+        "src/eval/trace.rs (174 LOC) + src/eval/metrics.rs (73 LOC) \u2014 trace collection, flushing, metrics calculation \u2014 zero tests",
+        "No tests/ directory, no integration tests, no snapshot tests"
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "architectural_change",
+      "confidence": "high",
+      "issues_preventing_higher_score": "The codebase has essentially zero test coverage. Critical simulation logic (physics, flight control, LLM integration, terrain, config, trace/metrics) is completely untested. The single existing test validates a mathematical roundtrip property but does not cover any business logic."
+    },
+    "contract_coherence": {
+      "evidence": [
+        "update_guided_mode in src/drone/controller.rs handles all 8 flight modes (Manual, Stabilize, AltHold, Loiter, Guided, Auto, Rtl, Land) despite name implying only Guided mode",
+        "update_camera_views in src/drone/camera.rs spawns new Camera3dBundle entities and viewport displays when cameras don't exist, hidden behind an 'update' name",
+        "parse_osm_length in src/world/osm_loader.rs claims to parse unit suffixes but strips them without interpretation ('10 m' and '10 ft' both return 10.0)",
+        "resolve_api_url in src/core/config.rs silently overrides custom URLs that happen to match hardcoded known defaults, contrary to expectation that explicit URLs are respected",
+        "flush in src/eval/trace.rs resets trace_id and start_time, rotating to a new trace rather than merely flushing buffered events",
+        "spawn_terrain in src/world/terrain.rs and spawn_textured_terrain in src/world/satellite_terrain.rs both insert TerrainData resource as a hidden side effect",
+        "record_event in src/eval/trace.rs silently drops events when mutex lock fails, violating the implicit contract that recorded events are captured",
+        "start_satellite_tile_downloads in src/world/satellite_terrain.rs destructively clears tiles_needed, tiles_ready, and terrain_spawned state in addition to starting downloads",
+        "handle_reload_world in src/main.rs performs complete world teardown (despawn_recursive on all world/drone entities, clearing all state, regenerating terrain, respawning everything) rather than merely 'handling' an event"
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Multiple functions have names that understate their side effects (update_guided_mode, update_camera_views, spawn_terrain, handle_reload_world). parse_osm_length documentation claims unit-aware parsing but ignores units. resolve_api_url has surprising fallback behavior that overrides user-configured URLs."
+    },
+    "logic_clarity": {
+      "evidence": [
+        "Identical match arms in src/llm/client.rs: 'ollama' arm and _ fallback both dispatch to prompt_ollama (lines 46-49, 81-84)",
+        "Identical match arms in src/world/osm_loader.rs: 'residential' => 5.0 and _ => 5.0 are redundant (lines 135-142)",
+        "Unreachable unwrap_or_default() in src/main.rs after load_osm_data(Path::new('')) \u2014 the function always returns Ok for nonexistent paths (lines 120, 123, 366, 368)",
+        "async fn prompt_demo in src/llm/client.rs contains no .await expressions (line 53)",
+        "Fragile first-frame sentinel in src/eval/metrics.rs: uses flight_time_secs <= dt to detect initialization (lines 62-66)",
+        "Redundant Option unwrapping in src/drone/controller.rs: mission_len and loop_mission computed before if let Some(mission) where they could use the bound value directly (lines 203-204)",
+        "No-op drop(slice) in src/drone/visual.rs on a type that does not implement Drop (line 154)"
+      ],
+      "impact_scope": "local",
+      "fix_scope": "single_edit",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Redundant match arms and unreachable fallback code suggest the author over-defended against edge cases without verifying what the called functions actually guarantee. These are minor but they erode trust in the control flow."
+    },
+    "high_level_elegance": {
+      "evidence": [
+        "Domain-aligned top-level modules: core/, world/, drone/, llm/, eval/, ui/ each map to distinct capabilities described in README",
+        "Consistent plugin architecture: every major subsystem implements Bevy's Plugin trait (WorldPlugin, DronePlugin, LlmPlugin, EvalPlugin, UiPlugin, SplashPlugin)",
+        "handle_reload_world in main.rs (70 lines, 16 parameters) directly manipulates resources from world, drone, ui, eval, and llm subsystems, breaking plugin encapsulation",
+        "world/satellite_terrain.rs imports TileKey and lat_lon_to_pixel from ui::map_tiles, creating an inverted dependency where world depends on UI",
+        "core/types.rs accumulates all domain types (DroneId, Pose, FlightMode, Waypoint, Mission, SimEvent, etc.) into a single 155-line catch-all module with 12 importers"
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "architectural_change",
+      "confidence": "high"
+    },
+    "type_safety": {
+      "evidence": [
+        "LlmConfig.provider is a String matched against closed literals in multiple places",
+        "LlmDecision.action and ReasoningStep.step_type are Stringly-typed closed sets",
+        "llm/client.rs defines a local Usage struct that mirrors the public Usage struct",
+        "SimTimestamp silently truncates u128 nanos to u64 via as cast",
+        "LlmClient::new discards reqwest::Client build errors with unwrap_or_default",
+        "parse_llm_response indexes untyped serde_json::Value instead of deserializing into a struct"
+      ],
+      "impact_scope": "subsystem",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "sub_axes": {
+        "abstraction_leverage": 70.0,
+        "indirection_cost": 80.0,
+        "interface_honesty": 65.0,
+        "delegation_density": 85.0,
+        "definition_directness": 75.0,
+        "type_discipline": 60.0
+      }
+    },
+    "error_consistency": {
+      "evidence": [
+        "Dominant strategy is anyhow::Result used in config, LLM client, OSM loader, and trace flush",
+        "Mixed error types: ui/map_tiles.rs and world/satellite_terrain.rs return Result<T, String> while llm/client.rs uses anyhow::Result",
+        "Silent error swallowing with 'let _ =' on I/O operations in eval/trace.rs, drone/visual.rs, ui/map_tiles.rs, world/satellite_terrain.rs",
+        "Inconsistent mutex poison handling: flush() converts to anyhow error, get_trace_size_estimate() silently returns 0, handle_reload_world() silently skips",
+        "LLM errors gracefully degrade to hover action (positive pattern) but only log via eprintln without structured propagation"
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": "Silent error swallowing on I/O boundaries contradicts the anyhow::Result contract in multiple modules; String errors in tile download paths lose context and prevent ?-based chaining; inconsistent mutex poison handling means the same failure mode has three different behaviors."
+    },
+    "naming_quality": {
+      "evidence": [
+        "update_guided_mode in drone/controller.rs handles all 8 flight modes (Manual, Stabilize, AltHold, Loiter, Guided, Auto, RTL, Land) despite its name suggesting only Guided mode",
+        "_geo parameter in drone/physics.rs update_physics has underscore prefix (conventionally unused) but is actively called on lines 60 and 105",
+        "debug_navigate_hotkey in main.rs is user-facing functionality (press 'N' to teleport) not debug-only code",
+        "DroneCamera fields _drone_id, _fov, _resolution use underscore prefix to suppress unused warnings, making intentional config storage look like dead code",
+        "ms suffix in max_speed_ms, average_speed_ms, max_climb_rate_ms is ambiguous (milliseconds vs meters/second)",
+        "Strong positive: GPS conversion functions have excellent names (gps_to_enu, enu_to_gps, enu_to_world, world_to_gps)",
+        "Strong positive: Domain type names are descriptive (SimTimestamp, GpsCoord, EnuCoord, FlightMode, GeoReference, BuildingCollider)"
+      ],
+      "impact_scope": "module",
+      "fix_scope": "single_edit",
+      "confidence": "high"
+    },
+    "low_level_elegance": {
+      "evidence": [
+        "map_panel in ui/map_tiles.rs is a 256-line monolith mixing rendering, input handling, tile management, and overlays",
+        "update_guided_mode in drone/controller.rs is 183 lines with duplicated PID-like control logic across 6+ flight mode arms",
+        "prompt_ollama and prompt_ollama_visual in llm/client.rs are 92% near-duplicates with only images field differing",
+        "handle_reload_world in main.rs accepts 16 parameters \u2014 a wide parameter bag",
+        "simple_noise function and terrain generation logic duplicated between terrain.rs and satellite_terrain.rs",
+        "apply_llm_decisions in llm/mod.rs has a 40-line string match with nearly identical body patterns",
+        "spawn_textured_terrain in satellite_terrain.rs has 11 parameters",
+        "gps.rs shows good low-level elegance: direct, well-named coordinate conversions with clear math",
+        "splash.rs is clean with well-extracted, focused functions",
+        "metrics.rs update_metrics is a focused function with single responsibility"
+      ],
+      "impact_scope": "module",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "sub_axes": {
+        "abstraction_leverage": 55.0,
+        "indirection_cost": 70.0,
+        "interface_honesty": 75.0,
+        "delegation_density": 65.0,
+        "definition_directness": 60.0,
+        "type_discipline": 80.0
+      }
+    },
+    "mid_level_elegance": {
+      "evidence": [
+        "main.rs handle_reload_world (lines 306-393) directly manipulates 12+ resources from 6 modules and calls impl functions from world/buildings, drone/mod, and world/satellite_terrain - a god orchestrator instead of composed collaborators",
+        "world/satellite_terrain.rs imports lat_lon_to_pixel and TileKey from ui::map_tiles (line 9), inverting dependency direction so a world-layer module depends on a UI-layer module",
+        "drone/controller.rs update_guided_mode is 300 lines handling 8 flight modes with direct coupling to TerrainData, GeoReference, and TraceCollector at the boundary",
+        "world/terrain.rs and world/satellite_terrain.rs both contain identical simple_noise function and near-identical height generation loops - terrain generation boundary is not owned by one module",
+        "ui/mod.rs system ordering (line 45) depends on drone::controller::process_input and update_guided_mode, coupling UI scheduling to controller internals",
+        "eval/trace.rs auto_save_traces (lines 154-173) reconstructs EvalConfig from collector fields rather than receiving it as a parameter, creating a fragile config boundary",
+        "drone/mod.rs spawn_drones_impl takes 8 parameters including mutable refs to Commands, Mesh/Material assets, and TraceCollector - the handoff signature is wide and ad-hoc",
+        "main.rs (lines 133-145) manually decomposes SimConfig into 5 individual resource inserts, duplicating the config structure at the application boundary instead of inserting SimConfig as a whole",
+        "drone/visual.rs uses crossbeam channels for main-world/render-world handoff - this is a clean, explicit boundary pattern",
+        "core/gps.rs provides a well-defined translation boundary between GPS/ENU/World coordinates with all conversions in one obvious place"
+      ],
+      "impact_scope": "codebase",
+      "fix_scope": "multi_file_refactor",
+      "confidence": "high",
+      "issues_preventing_higher_score": "The reload orchestrator in main.rs is a god function that knows internals of every module; world-layer depends on ui-layer for tile math; terrain generation is duplicated across two files; controller update_guided_mode couples flight mode logic to terrain, GPS, and trace collection at a single boundary."
+    }
+  },
+  "dimension_judgment": {
+    "test_strategy": {
+      "dimension_character": "The codebase is essentially untested: one unit test in 5,129 LOC of production Rust. The lone test (gps roundtrip) is well-written, suggesting the authors know how to test, but critical simulation logic \u2014 physics, flight control, LLM integration, terrain generation, config loading, and trace collection \u2014 has zero coverage. There are no integration tests, no snapshot tests, and no tests/ directory.",
+      "score_rationale": "A score of 8.0 reflects near-total absence of tests for a codebase with substantial business logic. The single test is the only positive signal, but it covers a tiny fraction of the code. Any change to physics, flight modes, LLM parsing, or terrain risks silent regressions. This is a structural test-strategy failure, not a few missing edge cases."
+    },
+    "contract_coherence": {
+      "dimension_character": "The codebase generally uses clear, descriptive names and follows Bevy system conventions, but several functions hide significant side effects behind understated names. Documentation occasionally over-promises capabilities (unit parsing) or under-describes behavior (fallback URL overrides).",
+      "score_rationale": "Score of 65 reflects several concrete contract violations: update_guided_mode handles all flight modes, update_camera_views spawns entities, parse_osm_length ignores units it claims to parse, and multiple functions perform resource insertion or full world resets hidden behind narrower names. These are real developer-surprise issues, not nitpicks."
+    },
+    "logic_clarity": {
+      "dimension_character": "The control flow is generally direct and readable, with clear match expressions and straightforward Bevy system scheduling. Most branches serve distinct purposes. However, a few match arms have identical bodies (LLM provider dispatch, OSM road width fallback) and some defensive patterns are provably unreachable, which slightly undermines confidence in the logic.",
+      "score_rationale": "Score of 83.0 reflects mostly sound logic with localized clarity defects: redundant match arms, an async function with no awaits, a fragile timing-based sentinel, and dead fallback paths. No systemic logic confusion or serious control-flow bugs were found. Fixing the identified issues would push this into the high-80s."
+    },
+    "high_level_elegance": {
+      "dimension_character": "The codebase has a clean, domain-aligned decomposition with consistent plugin architecture across all major subsystems. Each top-level module maps to a real capability, and the README accurately describes the runtime structure. However, a single function in main.rs (handle_reload_world) breaks plugin encapsulation by directly orchestrating state teardown and rebuild across every subsystem, and the world module unexpectedly depends on the UI module for shared tile math.",
+      "score_rationale": "The structural foundation is strong: domain modules are predictable, the plugin pattern is applied uniformly, and responsibilities are generally well-separated. The 75.0 score reflects that the architecture serves developers well for normal navigation, but two boundary violations\u2014a centralized cross-plugin reload orchestrator and an inverted world-to-ui dependency\u2014create ownership confusion that would surprise a new engineer."
+    },
+    "type_safety": {
+      "dimension_character": "The codebase leverages Rust's type system well for ECS and geometry, but undermines it in the LLM subsystem by using raw strings for closed sets and duplicating struct definitions. Silent numeric truncation and swallowed builder errors add to the fragility.",
+      "score_rationale": "A 72.0 reflects solid foundational typing (enums for FlightMode/DamageLevel, Result for I/O) undercut by stringly-typed LLM provider/actions and a duplicated Usage struct. Fixing the LLM module's type discipline would raise the score significantly."
+    },
+    "error_consistency": {
+      "dimension_character": "The codebase has adopted anyhow::Result as the primary error strategy for I/O-bound operations, which is a reasonable choice for an application. However, this strategy is undermined by widespread silent error swallowing via 'let _ =', mixed use of bare String errors in async tile download paths, and inconsistent handling of mutex poison across related functions.",
+      "score_rationale": "A score of 55.0 reflects that the dominant error strategy is sound (anyhow::Result) and some boundaries gracefully degrade (LLM hover fallback, tile Failed state), but the codebase suffers from enough silent swallowing and type inconsistency that a developer cannot trust error return values to mean all operations succeeded."
+    },
+    "naming_quality": {
+      "dimension_character": "The codebase has generally strong domain-aligned naming with clear type and function names, but suffers from a few significant name/behavior mismatches\u2014most notably a 300-line function misnamed after a single flight mode\u2014and misleading underscore prefixes on actively-used parameters and fields.",
+      "score_rationale": "Most names clearly communicate intent and follow Rust conventions consistently. However, update_guided_mode's severe name/behavior mismatch, the actively-used _geo parameter with an 'unused' prefix, and the debug_navigate_hotkey mislabeling are genuine developer-experience issues that would mislead maintainers. The ms abbreviation ambiguity is a minor but recurring issue. Score anchored at 80.0."
+    },
+    "low_level_elegance": {
+      "dimension_character": "The codebase shows a split personality: small modules like gps.rs, splash.rs, and metrics.rs demonstrate clean, focused function internals with direct control flow and explicit state mutation. However, several high-traffic files contain significant monoliths \u2014 map_panel (256 lines), update_guided_mode (183 lines), and near-duplicate LLM client pairs \u2014 that violate extraction balance and obscure intent. Variable names are generally meaningful and side effects are bounded, but the presence of 16-parameter functions and duplicated terrain generation logic indicates helper extraction is inconsistent.",
+      "score_rationale": "A score of 62.0 reflects that the codebase is generally readable and state mutation is explicit, but several core files contain monolithic functions with unnecessary complexity. The flight controller duplicates PID-like logic across 6 arms, the map panel mixes 6+ concerns in one closure, and the LLM client has 92% duplicated functions. These are real impediments to understanding function-level behavior, not style nits. The positive patterns in gps.rs, types.rs, and splash.rs prevent a lower score."
+    },
+    "mid_level_elegance": {
+      "dimension_character": "The codebase has a clean plugin-level architecture where each module exposes a Plugin type, but the seams between modules are degraded by a god orchestrator in main.rs, inverted dependencies from world to ui, duplicated terrain generation logic, and a controller function that couples 8 flight modes to terrain/geo/trace at a single boundary.",
+      "score_rationale": "A score of 58 reflects that the high-level plugin structure is sound and some boundaries (GPS translation, visual frame capture channels) are well-designed, but the reload handler is a severe seam violation, world\u2192ui dependency inversion breaks layer separation, terrain generation duplication blurs module ownership, and the controller's update_guided_mode is an overloaded boundary function. These are structural seam problems, not nitpicks."
+    }
+  },
+  "context_updates": [
+    "test_strategy",
+    "contract_coherence",
+    "logic_clarity",
+    "high_level_elegance",
+    "type_safety",
+    "error_consistency",
+    "naming_quality",
+    "low_level_elegance",
+    "mid_level_elegance"
+  ],
+  "retrospectives": [
+    {
+      "root_causes": [
+        "Project appears to have been built without a testing culture from the start \u2014 no test infrastructure or patterns were established",
+        "Heavy reliance on Bevy ECS makes unit testing challenging without extracting pure logic from system functions"
+      ],
+      "likely_symptoms": [
+        "Silent regressions in physics or flight modes would only be caught during manual gameplay testing",
+        "LLM response parsing bugs (e.g., JSON extraction edge cases) would only surface during live API calls"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "Functions grew beyond their original scope without renaming (update_guided_mode, update_camera_views)",
+        "Side effects accumulated organically without reflecting them in names (spawn_terrain inserting resources, handle_reload_world doing full resets)"
+      ],
+      "likely_symptoms": [
+        "Developer confusion about which function owns resource creation",
+        "Silent data loss (events dropped, URLs overridden)"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "Over-defensive coding: adding fallback arms and unwrap guards without verifying whether the fallback is actually reachable",
+        "Interface evolution: prompt_visual and related methods were likely planned but never wired up, leaving dead async code"
+      ],
+      "likely_symptoms": [
+        "match_same_arms clippy warnings",
+        "unused_async clippy warnings",
+        "drop_non_drop clippy warnings"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "handle_reload_world was likely added as a pragmatic one-off feature without considering plugin boundary integrity",
+        "Tile coordinate math was placed in ui::map_tiles because it was first needed for the UI map panel, without recognizing it as shared domain logic"
+      ],
+      "likely_symptoms": [
+        "hle_reload_orchestration_in_main",
+        "hle_world_depends_on_ui",
+        "hle_types_catch_all"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "LLM integration added quickly without domain enums",
+        "JSON response parsing prioritized flexibility over type safety"
+      ],
+      "likely_symptoms": [
+        "String matching scattered across llm/ and config/",
+        "Silent defaults on malformed JSON fields"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "'let _ = ' pattern used as a convenient shorthand for 'I don't care about this error' without considering whether the caller should care",
+        "No codebase-wide error style guide: some modules adopted anyhow, others used String for async boundaries",
+        "Mutex poison treated differently based on function author's preference rather than a module-level policy"
+      ],
+      "likely_symptoms": [
+        "trace_flush_silent_swallow",
+        "tile_download_string_errors",
+        "visual_channel_silent_drop"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "Function names chosen before scope expanded (update_guided_mode likely started handling only Guided mode)",
+        "Underscore prefix used to suppress clippy warnings rather than addressing underlying design (unused fields/parameters)"
+      ],
+      "likely_symptoms": [
+        "update_guided_mode",
+        "_geo",
+        "debug_navigate_hotkey",
+        "_drone_id"
+      ],
+      "possible_false_positives": []
+    },
+    {
+      "root_causes": [
+        "Rapid feature addition without refactoring: large functions accumulated logic incrementally (map_panel grew with each UI feature)",
+        "Copy-paste extension pattern: LLM visual support added by duplicating text functions rather than parameterizing",
+        "Bevy ECS system constraints encourage wide parameter signatures, but the codebase doesn't use grouping structs to mitigate"
+      ],
+      "likely_symptoms": [
+        "Clippy too_many_lines, too_many_arguments, and boilerplate_duplication signals are genuine symptoms of low-level elegance issues",
+        "High signal density in map_tiles.rs, satellite_terrain.rs, and llm/client.rs correlates with actual monoliths/duplication"
+      ],
+      "possible_false_positives": [
+        "Unused import warnings and cast_precision_loss clippy warnings are type-safety issues, not low-level elegance",
+        "The allow(dead_code) attributes in client.rs on visual functions indicate incomplete migration, not elegance issues"
+      ]
+    },
+    {
+      "root_causes": [
+        "The reload handler grew organically to handle all cleanup/spawn logic, becoming a god orchestrator because there is no defined reload protocol between modules",
+        "Tile coordinate math was placed in ui/map_tiles.rs because that's where it was first needed, but it's actually a core geographic concept that both UI and world need",
+        "Flight mode logic was inlined into the controller because Bevy systems need all their dependencies as parameters, encouraging large functions rather than composed sub-systems"
+      ],
+      "likely_symptoms": [
+        "handle_reload_world",
+        "update_guided_mode",
+        "simple_noise duplication",
+        "ui imports of controller functions"
+      ],
+      "possible_false_positives": []
+    }
+  ]
+}
