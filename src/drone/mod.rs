@@ -46,6 +46,7 @@ impl Plugin for DronePlugin {
             .insert_resource(visual::CaptureResultReceiver { receiver: result_receiver })
             .init_resource::<visual::VisualFrameBuffer>()
             .init_resource::<DroneTypeRegistry>()
+            .init_resource::<Fleet>()
             .add_systems(Startup, spawn_drones.after(crate::world::terrain::insert_terrain_data))
             .add_systems(Startup, select_first_drone.after(spawn_drones))
             .configure_sets(Update, (
@@ -71,7 +72,9 @@ impl Plugin for DronePlugin {
             .add_systems(Update, despawn_drone_entities.after(crate::handle_reload_world))
             .add_systems(Update, clear_drone_data.after(crate::handle_reload_world))
             .add_systems(Update, respawn_drones_on_reload.after(crate::world::reload_osm_data))
-            .add_event::<DroneDestroyedEvent>();
+            .add_event::<DroneDestroyedEvent>()
+            .add_event::<SpawnDroneEvent>()
+            .add_systems(Update, handle_spawn_drone_events.after(crate::world::terrain::insert_terrain_data));
 
         let render_app = app.sub_app_mut(RenderApp);
         render_app
@@ -149,6 +152,13 @@ pub enum DamageLevel {
 #[derive(Event)]
 pub struct DroneDestroyedEvent {
     pub drone_id: DroneId,
+}
+
+#[derive(Event)]
+pub struct SpawnDroneEvent {
+    pub lat: f64,
+    pub lon: f64,
+    pub drone_type: DroneType,
 }
 
 /// Identity + type marker - EVERY drone entity has this
@@ -425,5 +435,98 @@ fn select_first_drone(
             input_state.selected_drone = Some(identity.id);
             fleet.select(identity.id);
         }
+    }
+}
+
+pub fn handle_spawn_drone_events(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut events: EventReader<SpawnDroneEvent>,
+    registry: Res<DroneTypeRegistry>,
+    geo: Res<crate::core::gps::GeoReference>,
+    terrain: Res<crate::world::terrain::TerrainData>,
+    mut trace: ResMut<TraceCollector>,
+    mut input_state: ResMut<controller::DroneInputState>,
+) {
+    for event in events.read() {
+        let drone_type = event.drone_type;
+        let spec = registry.specs.get(&drone_type).unwrap();
+        let airframe = &spec.airframe;
+
+        let gps = GpsCoord {
+            latitude: event.lat,
+            longitude: event.lon,
+            altitude_msl: 20.0,
+        };
+        let position = geo.gps_to_world(&gps);
+        let drone_id = DroneId::new();
+
+        let body_color = airframe.body_color;
+        let arm_color = airframe.arm_color;
+
+        let drone_entity = spawn_drone_bundle(&mut commands, drone_id, drone_type, position, gps, &registry);
+
+        commands.entity(drone_entity).insert((
+            PbrBundle {
+                mesh: meshes.add(Cuboid::new(
+                    airframe.body_dimensions.x,
+                    airframe.body_dimensions.y,
+                    airframe.body_dimensions.z,
+                )),
+                material: materials.add(StandardMaterial {
+                    base_color: body_color,
+                    metallic: 0.5,
+                    perceptual_roughness: 0.4,
+                    ..default()
+                }),
+                transform: Transform::from_translation(position),
+                ..default()
+            },
+            Name::new(format!("{} {:?}", spec.name, drone_id)),
+        ));
+
+        for arm in 0..airframe.arm_count {
+            let arm_angle = (arm as f32 / airframe.arm_count as f32) * std::f32::consts::TAU
+                + std::f32::consts::FRAC_PI_4;
+            let arm_x = arm_angle.cos() * airframe.arm_length;
+            let arm_z = arm_angle.sin() * airframe.arm_length;
+            let arm_len = airframe.arm_length * 2.0;
+
+            commands.spawn(PbrBundle {
+                mesh: meshes.add(Cuboid::new(
+                    airframe.arm_thickness.x,
+                    airframe.arm_thickness.y,
+                    arm_len,
+                )),
+                material: materials.add(StandardMaterial {
+                    base_color: arm_color,
+                    ..default()
+                }),
+                transform: Transform::from_xyz(arm_x, 0.0, arm_z)
+                    .with_rotation(Quat::from_rotation_y(arm_angle)),
+                ..default()
+            }).set_parent(drone_entity);
+        }
+
+        if drone_type == DroneType::VtolFixedWing {
+            commands.spawn(PbrBundle {
+                mesh: meshes.add(Cuboid::new(0.8, 0.02, 0.25)),
+                material: materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.9, 0.9, 0.9),
+                    ..default()
+                }),
+                transform: Transform::from_xyz(0.0, 0.05, 0.0),
+                ..default()
+            }).set_parent(drone_entity);
+        }
+
+        trace.record_event(crate::core::types::SimEvent::DroneSpawned {
+            drone_id,
+            timestamp: SimTimestamp::now(),
+            initial_gps: gps,
+        });
+
+        input_state.selected_drone = Some(drone_id);
     }
 }

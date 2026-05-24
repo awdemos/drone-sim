@@ -9,4 +9,6 @@
 /config/sim.local.toml
 .env
 .desloppify/
-/data/tiles/
+/data/
+*.bak
+scorecard.png

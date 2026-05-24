@@ -162,7 +162,7 @@ fn setup_splash(
         .with_children(|parent| {
             parent.spawn(
                 TextBundle::from_section(
-                    "DRONE SIMULATOR",
+                    "Drone Flight Simulator",
                     TextStyle {
                         font_size: 72.0,
                         color: Color::srgb(0.2, 0.8, 1.0),
@@ -174,7 +174,7 @@ fn setup_splash(
 
             parent.spawn(
                 TextBundle::from_section(
-                    "Scanning the skies above real cities...",
+                    "Human pilots and AI co-pilots, flying together in real-world cities",
                     TextStyle {
                         font_size: 24.0,
                         color: Color::srgb(0.7, 0.8, 0.9),

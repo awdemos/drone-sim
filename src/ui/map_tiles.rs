@@ -3,7 +3,8 @@ use bevy_egui::{egui, EguiContexts};
 use std::collections::HashMap;
 
 use crate::core::mercator::*;
-use crate::ui::ReloadWorldEvent;
+use crate::ui::{ReloadWorldEvent, UiPreferences};
+use crate::drone::SpawnDroneEvent;
 
 pub struct MapTilePlugin;
 
@@ -333,15 +334,15 @@ pub fn map_panel(
     mut commands: Commands,
     mut contexts: EguiContexts,
     mut tile_state: ResMut<MapTileState>,
+    mut retry_queue: ResMut<TileRetryQueue>,
     mut input_state: ResMut<crate::drone::controller::DroneInputState>,
     mut drone_query: Query<(Entity, &crate::drone::DroneIdentity, &crate::drone::Kinematics, &mut crate::drone::MissionState, &mut crate::drone::FlightControl)>,
     geo: Res<crate::core::gps::GeoReference>,
     mut navigate_events: EventWriter<ReloadWorldEvent>,
+    ui_prefs: Res<UiPreferences>,
+    mut spawn_events: EventWriter<SpawnDroneEvent>,
 ) {
-    egui::Window::new("Map")
-        .default_pos([650.0, 10.0])
-        .default_size([520.0, 520.0])
-        .show(contexts.ctx_mut(), |ui| {
+    egui::CentralPanel::default().show(contexts.ctx_mut(), |ui| {
             // ── Map style controls ──
             ui.horizontal(|ui| {
                 ui.label("Style:");
@@ -357,6 +358,7 @@ pub fn map_panel(
                     if ui.selectable_label(selected, provider.name()).clicked() && !selected {
                         tile_state.provider = provider;
                         tile_state.tiles.clear();
+                        retry_queue.retries.clear();
                     }
                 }
             });
@@ -369,9 +371,8 @@ pub fn map_panel(
             ui.separator();
 
             let available = ui.available_size();
-            let map_size = available.x.min(available.y);
             let (rect, response) = ui.allocate_exact_size(
-                egui::Vec2::new(map_size, map_size),
+                available,
                 egui::Sense::click_and_drag(),
             );
 
@@ -416,6 +417,7 @@ pub fn map_panel(
                     tile_state.zoom = new_zoom;
                     // Clear old-zoom tiles so we fetch new ones
                     tile_state.tiles.retain(|k, _| k.z == new_zoom);
+                    retry_queue.retries.clear();
                 }
             }
 
@@ -428,9 +430,10 @@ pub fn map_panel(
             let max_ty = ((tl_py + rect.height() as f64) / 256.0).ceil() as i32;
 
             // Spawn downloads for missing visible tiles
+            let max_tile_coord = (1u32 << tile_state.zoom) as i32;
             for tx in min_tx..=max_tx {
                 for ty in min_ty..=max_ty {
-                    if tx < 0 || ty < 0 {
+                    if tx < 0 || ty < 0 || tx >= max_tile_coord || ty >= max_tile_coord {
                         continue;
                     }
                     let key = TileKey {
@@ -441,9 +444,9 @@ pub fn map_panel(
                     if !tile_state.tiles.contains_key(&key) {
                         tile_state.tiles.insert(key, TileState::Loading);
                         let provider = tile_state.provider.clone();
-            let task = bevy::tasks::IoTaskPool::get().spawn(async move {
-                download_tile(key, provider)
-            });
+                        let task = bevy::tasks::IoTaskPool::get().spawn(async move {
+                            download_tile(key, provider)
+                        });
                         commands.spawn(TileDownloadTask { task, key, _provider: tile_state.provider });
                     }
                 }
@@ -470,7 +473,7 @@ pub fn map_panel(
             let provider = tile_state.provider;
             for tx in min_tx..=max_tx {
                 for ty in min_ty..=max_ty {
-                    if tx < 0 || ty < 0 {
+                    if tx < 0 || ty < 0 || tx >= max_tile_coord || ty >= max_tile_coord {
                         continue;
                     }
                     let key = TileKey {
@@ -656,6 +659,19 @@ pub fn map_panel(
                     let mouse_py = tl_py + (mouse.y - rect.min.y) as f64;
                     let (lat, lon) = pixel_to_lat_lon(mouse_px, mouse_py, tile_state.zoom);
                     navigate_events.send(ReloadWorldEvent { lat, lon });
+                }
+            }
+
+            if response.double_clicked() && clicked_drone.is_none() {
+                if let Some(mouse) = click_pos {
+                    let mouse_px = tl_px + (mouse.x - rect.min.x) as f64;
+                    let mouse_py = tl_py + (mouse.y - rect.min.y) as f64;
+                    let (lat, lon) = pixel_to_lat_lon(mouse_px, mouse_py, tile_state.zoom);
+                    spawn_events.send(SpawnDroneEvent {
+                        lat,
+                        lon,
+                        drone_type: ui_prefs.selected_spawn_type,
+                    });
                 }
             }
 

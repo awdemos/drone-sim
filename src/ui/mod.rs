@@ -6,24 +6,20 @@ use crate::eval::metrics::MetricsCollector;
 use crate::eval::trace::TraceCollector;
 use crate::llm::reasoning::ReasoningTrace;
 
-
 pub mod map_tiles;
 
-/// Event to trigger world reload at new GPS coordinates
 #[derive(Event)]
 pub struct ReloadWorldEvent {
     pub lat: f64,
     pub lon: f64,
 }
 
-/// UI state for navigation input
 #[derive(Resource, Default)]
 pub struct NavigateState {
     pub lat_input: String,
     pub lon_input: String,
 }
 
-/// UI state for mission planning
 #[derive(Resource, Default)]
 pub struct MissionPlannerState {
     pub waypoints: Vec<crate::core::types::Waypoint>,
@@ -33,14 +29,37 @@ pub struct MissionPlannerState {
     pub loop_mission: bool,
 }
 
-/// Grouped UI preferences for spawn type and LLM toggle.
 #[derive(Resource, Default)]
 pub struct UiPreferences {
     pub llm_enabled: bool,
     pub selected_spawn_type: DroneType,
 }
 
-/// Plugin for UI
+#[derive(Resource)]
+pub struct PanelVisibility {
+    pub drone_control: bool,
+    pub telemetry: bool,
+    pub llm_reasoning: bool,
+    pub metrics: bool,
+    pub navigate: bool,
+    pub camera_feeds: bool,
+    pub mission_planner: bool,
+}
+
+impl Default for PanelVisibility {
+    fn default() -> Self {
+        Self {
+            drone_control: true,
+            telemetry: true,
+            llm_reasoning: true,
+            metrics: true,
+            navigate: true,
+            camera_feeds: true,
+            mission_planner: true,
+        }
+    }
+}
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -51,7 +70,9 @@ impl Plugin for UiPlugin {
             .init_resource::<NavigateState>()
             .init_resource::<MissionPlannerState>()
             .init_resource::<UiPreferences>()
+            .init_resource::<PanelVisibility>()
             .add_event::<ReloadWorldEvent>()
+            .add_systems(Update, top_menu_bar.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
             .add_systems(Update, drone_panel.run_if(resource_exists::<crate::splash::AppReady>).after(process_input).before(update_flight_mode).after(EguiSet::InitContexts))
             .add_systems(Update, telemetry_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
             .add_systems(Update, llm_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
@@ -63,6 +84,35 @@ impl Plugin for UiPlugin {
             .add_systems(Update, clear_minimap_on_reload.after(crate::handle_reload_world))
             .add_systems(Update, cleanup_tile_download_tasks.after(crate::handle_reload_world));
     }
+}
+
+fn top_menu_bar(
+    mut contexts: EguiContexts,
+    mut panel_vis: ResMut<PanelVisibility>,
+    camera_mode: Res<CameraMode>,
+) {
+    egui::TopBottomPanel::top("top_menu").show(contexts.ctx_mut(), |ui| {
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("View", |ui| {
+                ui.checkbox(&mut panel_vis.drone_control, "Drone Control");
+                ui.checkbox(&mut panel_vis.telemetry, "Telemetry");
+                ui.checkbox(&mut panel_vis.llm_reasoning, "LLM Reasoning");
+                ui.checkbox(&mut panel_vis.metrics, "Metrics");
+                ui.checkbox(&mut panel_vis.navigate, "Navigate");
+                ui.checkbox(&mut panel_vis.camera_feeds, "Camera Feeds");
+                ui.checkbox(&mut panel_vis.mission_planner, "Mission Planner");
+            });
+
+            ui.separator();
+
+            let mode_label = match *camera_mode {
+                CameraMode::Overhead => "Overhead",
+                CameraMode::StreetView => "Street View",
+            };
+            ui.label(format!("Camera: {}", mode_label));
+            ui.label("(V to toggle)");
+        });
+    });
 }
 
 pub fn clear_minimap_on_reload(
@@ -89,24 +139,20 @@ pub fn cleanup_tile_download_tasks(
     }
 }
 
-/// Main drone control panel
 fn drone_panel(
     mut contexts: EguiContexts,
     mut input_state: ResMut<DroneInputState>,
     mut ui_state: ResMut<UiPreferences>,
+    panel_vis: Res<PanelVisibility>,
     drone_query: Query<(&DroneIdentity, &FlightControl, &Health, &Battery)>,
-    camera_mode: Res<CameraMode>,
 ) {
-    egui::Window::new("Drone Control").show(contexts.ctx_mut(), |ui| {
-        ui.horizontal(|ui| {
-            let mode_label = match *camera_mode {
-                CameraMode::Overhead => "Overhead",
-                CameraMode::StreetView => "Street View",
-            };
-            ui.label(format!("Camera: {}", mode_label));
-            ui.label("(V to toggle)");
-        });
-        ui.separator();
+    if !panel_vis.drone_control {
+        return;
+    }
+    egui::Window::new("Drone Control")
+        .default_pos([10.0, 40.0])
+        .default_size([320.0, 180.0])
+        .show(contexts.ctx_mut(), |ui| {
         ui.heading("Flight Modes");
         ui.horizontal(|ui| {
             if ui.button("1: Manual").clicked() { input_state.mode_request = Some(FlightMode::Manual); }
@@ -197,24 +243,26 @@ fn drone_panel(
     });
 }
 
-/// Telemetry display panel
 fn telemetry_panel(
     mut contexts: EguiContexts,
     drone_query: Query<(&DroneIdentity, &Kinematics, &GpsPosition, &Health, &Battery)>,
-    _geo: Res<crate::core::gps::GeoReference>,
+    panel_vis: Res<PanelVisibility>,
 ) {
+    if !panel_vis.telemetry {
+        return;
+    }
     egui::Window::new("Telemetry")
-        .default_pos([10.0, 220.0])
+        .default_pos([10.0, 240.0])
         .default_size([320.0, 180.0])
         .show(contexts.ctx_mut(), |ui| {
         for (identity, kinematics, gps, health, battery) in drone_query.iter() {
             ui.group(|ui| {
-                ui.label(format!("Position: {:.1}, {:.1}, {:.1}", 
+                ui.label(format!("Position: {:.1}, {:.1}, {:.1}",
                     kinematics.position.x, kinematics.position.y, kinematics.position.z));
                 ui.label(format!("Velocity: {:.1} m/s", kinematics.velocity.length()));
                 ui.label(format!("GPS: {:.6}, {:.6}, {:.1}m",
                     gps.coord.latitude, gps.coord.longitude, gps.coord.altitude_msl));
-                
+
                 let (_, pitch, roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
                 ui.label(format!("Attitude: Pitch={:.1}°, Roll={:.1}°",
                     pitch.to_degrees(), roll.to_degrees()));
@@ -246,14 +294,17 @@ fn telemetry_panel(
     });
 }
 
-/// LLM reasoning panel
 fn llm_panel(
     mut contexts: EguiContexts,
     reasoning: Res<ReasoningTrace>,
     mut ui_state: ResMut<UiPreferences>,
+    panel_vis: Res<PanelVisibility>,
 ) {
+    if !panel_vis.llm_reasoning {
+        return;
+    }
     egui::Window::new("LLM Reasoning")
-        .default_pos([10.0, 410.0])
+        .default_pos([10.0, 430.0])
         .default_size([320.0, 200.0])
         .show(contexts.ctx_mut(), |ui| {
         let llm_status = if ui_state.llm_enabled {
@@ -312,7 +363,6 @@ fn llm_panel(
             }
         }
 
-        // Show status message for 3 seconds
         if let Some((msg, timestamp)) = &status {
             let elapsed = ui.input(|i| i.time) - *timestamp;
             if elapsed < 3.0 {
@@ -333,14 +383,17 @@ fn llm_panel(
     });
 }
 
-/// Metrics panel
 fn metrics_panel(
     mut contexts: EguiContexts,
     metrics: Res<MetricsCollector>,
     trace: Res<TraceCollector>,
+    panel_vis: Res<PanelVisibility>,
 ) {
+    if !panel_vis.metrics {
+        return;
+    }
     egui::Window::new("Metrics")
-        .default_pos([340.0, 10.0])
+        .default_pos([340.0, 40.0])
         .default_size([300.0, 200.0])
         .show(contexts.ctx_mut(), |ui| {
         if metrics.drone_metrics.is_empty() {
@@ -374,14 +427,17 @@ fn metrics_panel(
     });
 }
 
-/// Navigation panel for teleporting to new GPS coordinates
 fn navigate_panel(
     mut contexts: EguiContexts,
     mut state: ResMut<NavigateState>,
     mut events: EventWriter<ReloadWorldEvent>,
+    panel_vis: Res<PanelVisibility>,
 ) {
+    if !panel_vis.navigate {
+        return;
+    }
     egui::Window::new("Navigate")
-        .default_pos([340.0, 220.0])
+        .default_pos([340.0, 250.0])
         .default_size([280.0, 120.0])
         .show(contexts.ctx_mut(), |ui| {
             ui.horizontal(|ui| {
@@ -400,13 +456,15 @@ fn navigate_panel(
         });
 }
 
-/// Camera feed display panel
 fn camera_feed_panel(
     mut contexts: EguiContexts,
     drone_query: Query<&DroneIdentity>,
     camera_map: Res<DroneCameraMap>,
-    _images: Res<Assets<Image>>,
+    panel_vis: Res<PanelVisibility>,
 ) {
+    if !panel_vis.camera_feeds {
+        return;
+    }
     let mut textures_to_show = Vec::new();
     for identity in drone_query.iter() {
         if let Some(handle) = camera_map.images.get(&identity.id) {
@@ -417,7 +475,7 @@ fn camera_feed_panel(
     }
 
     egui::Window::new("Camera Feeds")
-        .default_pos([660.0, 10.0])
+        .default_pos([660.0, 40.0])
         .default_size([320.0, 400.0])
         .show(contexts.ctx_mut(), |ui| {
             for (id_str, texture_id) in textures_to_show {
@@ -429,17 +487,20 @@ fn camera_feed_panel(
         });
 }
 
-/// Mission planning panel
 fn mission_panel(
     mut contexts: EguiContexts,
     mut state: ResMut<MissionPlannerState>,
     mut drone_query: Query<(&DroneIdentity, &mut MissionState, &mut FlightControl)>,
     input_state: Res<DroneInputState>,
+    panel_vis: Res<PanelVisibility>,
 ) {
+    if !panel_vis.mission_planner {
+        return;
+    }
     use crate::core::types::{Mission, Waypoint};
 
     egui::Window::new("Mission Planner")
-        .default_pos([660.0, 420.0])
+        .default_pos([660.0, 450.0])
         .default_size([320.0, 300.0])
         .show(contexts.ctx_mut(), |ui| {
             ui.heading("Add Waypoint");

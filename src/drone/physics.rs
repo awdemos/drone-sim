@@ -120,7 +120,10 @@ pub fn update_physics(
                 angular_delta.y,
                 angular_delta.z,
             );
-            kinematics.orientation = (kinematics.orientation * rotation).normalize();
+            let new_orientation = kinematics.orientation * rotation;
+            if new_orientation.length_squared() > 0.0001 {
+                kinematics.orientation = new_orientation.normalize();
+            }
             gps_pos.coord = geo.world_to_gps(kinematics.position);
             continue;
         }
@@ -138,7 +141,10 @@ pub fn update_physics(
             angular_delta.y,
             angular_delta.z,
         );
-        kinematics.orientation = (kinematics.orientation * rotation).normalize();
+        let new_orientation = kinematics.orientation * rotation;
+        if new_orientation.length_squared() > 0.0001 {
+            kinematics.orientation = new_orientation.normalize();
+        }
 
         let max_tilt_angle = spec.flight_controller.max_tilt_angle_deg.to_radians();
         clamp_tilt(&mut kinematics, max_tilt_angle, flight_control.mode);

@@ -16,7 +16,7 @@ fn spawn_earth_backdrop(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
-    let earth_radius = 6_371_000.0;
+    let earth_radius = 2000.0;
     let texture_handle = asset_server.load("blue_marble.jpg");
 
     commands.spawn((
@@ -26,13 +26,14 @@ fn spawn_earth_backdrop(
                 base_color_texture: Some(texture_handle),
                 perceptual_roughness: 0.8,
                 reflectance: 0.1,
+                unlit: true,
                 ..default()
             }),
-            transform: Transform::from_xyz(0.0, -earth_radius + 100.0, 0.0),
+            transform: Transform::from_xyz(0.0, -earth_radius - 200.0, 0.0),
             ..default()
         },
         WorldEntity,
     ));
 
-    println!("Earth backdrop spawned with NASA Blue Marble texture");
+    println!("Earth backdrop spawned with NASA Blue Marble texture (radius={}, y={})", earth_radius, -earth_radius - 200.0);
 }

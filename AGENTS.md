@@ -32,6 +32,17 @@ cargo run --release
   - `ui/` — EGUI panels: drone control, telemetry, map tiles, mission planner, LLM reasoning
   - `eval/` — Metrics, trace collector, event buffering
 
+## Architecture Deviations
+
+Known structural debt (refactor targets):
+
+1. **main.rs bloat** — contains 300+ lines of camera controller, orbit camera, and world-reload logic that should live in `camera.rs` or `world/`
+2. **`unsafe static mut FRAME_COUNT`** in `main.rs` camera controller — use `AtomicU32` or `Local<T>` resource instead
+3. **Global events in main.rs** (`DespawnWorldEvent`, `ReloadOsmEvent`, etc.) — creates hub-and-spoke coupling; should be in dedicated `events.rs` module
+4. **`load_osm_with_fallback` in main.rs** — world concern, belongs in `src/world/osm_loader.rs`
+5. **`CameraMode` in `core/types.rs`** but camera controller in `main.rs` — type and logic should co-locate
+6. **`dynamic_linking` unconditionally enabled** in `Cargo.toml` — breaks distribution builds; should be behind a `dev` feature flag
+
 ## Critical Code Patterns
 
 ### Drone Selection
