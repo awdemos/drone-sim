@@ -31,16 +31,15 @@ pub fn update_camera_views(
     registry: Res<DroneTypeRegistry>,
 ) {
     // Update existing cameras
-    for (entity, identity, kinematics) in drone_query.iter() {
+    for (entity, identity, _kinematics) in drone_query.iter() {
         if let Some(&cam_entity) = camera_map.map.get(&identity.id) {
             if let Ok(mut cam_transform) = camera_query.get_mut(cam_entity) {
-                // Camera follows drone, slightly offset and looking forward
-                let forward = kinematics.orientation * Vec3::Z;
-                let up = kinematics.orientation * Vec3::Y;
-                let camera_pos = kinematics.position + up * 0.1 - forward * 0.2;
+                // Camera follows drone (child of drone entity) — local offset only.
+                // Parent Transform is synced to world position/orientation by sync_drone_transforms.
+                let camera_pos = Vec3::new(0.0, 0.1, -0.2); // up * 0.1 - forward * 0.2 in local frame
                 
                 *cam_transform = Transform::from_translation(camera_pos)
-                    .looking_at(kinematics.position + forward * 10.0, up);
+                    .looking_at(camera_pos + Vec3::Z * 10.0, Vec3::Y);
             }
         } else {
             // Create new camera for this drone
