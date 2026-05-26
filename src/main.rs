@@ -150,6 +150,7 @@ fn main() {
         .insert_resource(config.window.clone())
         .insert_resource(config.world.clone())
         .insert_resource(config.drone.clone())
+        .insert_resource(config.physics.clone())
         .insert_resource(config.llm.clone())
         .insert_resource(config.eval.clone())
         .insert_resource(geo)

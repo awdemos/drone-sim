@@ -8,6 +8,7 @@ pub struct SimConfig {
     pub window: WindowConfig,
     pub world: WorldConfig,
     pub drone: DroneConfig,
+    pub physics: PhysicsConfig,
     pub llm: LlmConfig,
     pub eval: EvalConfig,
 }
@@ -18,6 +19,7 @@ impl Default for SimConfig {
             window: WindowConfig::default(),
             world: WorldConfig::default(),
             drone: DroneConfig::default(),
+            physics: PhysicsConfig::default(),
             llm: LlmConfig::default(),
             eval: EvalConfig::default(),
         }
@@ -95,6 +97,35 @@ impl Default for DroneConfig {
             per_drone_types: Vec::new(),
             user_body_color: None,
             user_arm_color: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Resource)]
+pub struct PhysicsConfig {
+    /// Wind speed in m/s (surface)
+    pub wind_speed_ms: f32,
+    /// Wind direction in degrees (0=North, 90=East)
+    pub wind_direction_deg: f32,
+    /// Turbulence intensity (0..1, fraction of wind speed)
+    pub turbulence: f32,
+    /// Sea-level air density (kg/m³) — normalized reference, 1.0 = standard
+    pub sea_level_density: f32,
+    /// Atmospheric scale height in meters (density e-fold)
+    pub density_scale_height_m: f32,
+    /// Altitude offset for density calc (e.g., if sea-level is not y=0)
+    pub sea_level_offset_m: f32,
+}
+
+impl Default for PhysicsConfig {
+    fn default() -> Self {
+        Self {
+            wind_speed_ms: 0.0,
+            wind_direction_deg: 0.0,
+            turbulence: 0.1,
+            sea_level_density: 1.0,
+            density_scale_height_m: 8400.0,
+            sea_level_offset_m: 0.0,
         }
     }
 }

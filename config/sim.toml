@@ -19,6 +19,14 @@ per_drone_types = []
 # user_body_color = [0.8, 0.2, 0.2]
 # user_arm_color = [0.3, 0.3, 0.3]
 
+[physics]
+wind_speed_ms = 0.0
+wind_direction_deg = 0.0
+turbulence = 0.1
+sea_level_density = 1.0
+density_scale_height_m = 8400.0
+sea_level_offset_m = 0.0
+
 [llm]
 enabled = true
 # Provider: ollama | openai | moonshot | kimi | demo
