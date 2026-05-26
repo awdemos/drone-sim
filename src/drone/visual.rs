@@ -153,7 +153,6 @@ pub fn process_frame_captures(
 
             if rx.recv().is_ok() {
                 let data = slice.get_mapped_range().to_vec();
-                drop(slice);
                 buffer.unmap();
 
                 if result_sender.sender.send(CaptureResult {

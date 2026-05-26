@@ -188,7 +188,7 @@ fn main() {
         .add_systems(Startup, sync_minimap_center.after(setup_scene))
         .add_systems(Update, camera_controller.run_if(resource_exists::<splash::AppReady>))
         .add_systems(Update, handle_reload_world)
-        .add_systems(Update, debug_navigate_hotkey)
+        .add_systems(Update, default_location_hotkey)
         .run();
 }
 
@@ -250,6 +250,9 @@ fn camera_controller(
     drone_query: Query<&drone::Kinematics>,
     mut camera_mode: ResMut<CameraMode>,
 ) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
+
     let orbit_speed = 0.005;
     let pan_speed = 0.5;
     let zoom_speed = 2.0;
@@ -273,15 +276,12 @@ fn camera_controller(
 
         let drone_pos = drone_query.iter().next().map(|k| k.position);
 
-        static mut FRAME_COUNT: u32 = 0;
-        unsafe {
-            FRAME_COUNT += 1;
-            if FRAME_COUNT % 300 == 0 {
-                println!("Camera: mode={:?}, pos={:.1},{:.1},{:.1}, target={:.1},{:.1},{:.1}",
-                    orbit.mode,
-                    transform.translation.x, transform.translation.y, transform.translation.z,
-                    orbit.target.x, orbit.target.y, orbit.target.z);
-            }
+        let frame_count = FRAME_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if frame_count % 300 == 0 {
+            println!("Camera: mode={:?}, pos={:.1},{:.1},{:.1}, target={:.1},{:.1},{:.1}",
+                orbit.mode,
+                transform.translation.x, transform.translation.y, transform.translation.z,
+                orbit.target.x, orbit.target.y, orbit.target.z);
         }
 
         match orbit.mode {
@@ -450,7 +450,7 @@ fn sync_minimap_center(
     tile_state.center_pixel_y = py;
 }
 
-fn debug_navigate_hotkey(
+fn default_location_hotkey(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut events: EventWriter<ReloadWorldEvent>,
 ) {

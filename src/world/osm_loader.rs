@@ -153,7 +153,6 @@ fn load_osm_json(path: &std::path::Path, geo: &GeoReference) -> anyhow::Result<O
                     "primary" => 10.0,
                     "secondary" => 8.0,
                     "tertiary" => 7.0,
-                    "residential" => 5.0,
                     _ => 5.0,
                 });
 

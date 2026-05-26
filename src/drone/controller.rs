@@ -135,8 +135,7 @@ pub fn update_flight_mode(
         let fc = &spec.flight_controller;
 
         // Compute the thrust fraction needed to hover (mass * g / max_thrust)
-        let hover_thrust = (spec.airframe.mass_kg * 9.81 / spec.engine.max_thrust_n.max(0.01))
-            .clamp(0.05, 0.95);
+        let hover_thrust = compute_hover_thrust(spec.airframe.mass_kg, spec.engine.max_thrust_n);
 
         match flight_control.mode {
             FlightMode::Manual => {
@@ -341,5 +340,57 @@ pub fn update_flight_mode(
                 }
             }
         }
+    }
+}
+
+// ===================================================================
+// Pure helpers (extracted for testability)
+// ===================================================================
+
+/// Compute the thrust fraction [0.05, 0.95] needed to hover.
+pub fn compute_hover_thrust(mass_kg: f32, max_thrust_n: f32) -> f32 {
+    (mass_kg * 9.81 / max_thrust_n.max(0.01)).clamp(0.05, 0.95)
+}
+
+// ===================================================================
+// Unit tests
+// ===================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hover_thrust_exact_balance() {
+        // 1 kg drone, 9.81 N max thrust -> needs exactly 1.0 fraction, clamped to 0.95
+        assert!((compute_hover_thrust(1.0, 9.81) - 0.95).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_hover_thrust_low_mass() {
+        // Light drone should still respect minimum thrust
+        let thrust = compute_hover_thrust(0.01, 100.0);
+        assert_eq!(thrust, 0.05, "Very light drone should clamp to min thrust 0.05");
+    }
+
+    #[test]
+    fn test_hover_thrust_heavy_drone() {
+        // Heavy drone, limited thrust -> clamped to 0.95
+        let thrust = compute_hover_thrust(10.0, 10.0);
+        assert_eq!(thrust, 0.95, "Under-powered heavy drone should clamp to max thrust 0.95");
+    }
+
+    #[test]
+    fn test_hover_thrust_mid_range() {
+        // 2 kg drone, 40 N max thrust -> 2*9.81/40 = 0.4905
+        let thrust = compute_hover_thrust(2.0, 40.0);
+        assert!((thrust - 0.4905).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_hover_thrust_zero_max_thrust_guard() {
+        // Zero max thrust should not panic and should clamp high
+        let thrust = compute_hover_thrust(1.0, 0.0);
+        assert_eq!(thrust, 0.95, "Zero max thrust should be guarded by max(0.01)");
     }
 }
