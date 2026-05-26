@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use crate::core::gps::GeoReference;
 use crate::core::types::{FlightMode, SimEvent, SimTimestamp};
-use crate::drone::{DamageLevel, DroneIdentity, Kinematics, FlightControl, Battery, Health, GpsPosition};
+use crate::drone::{DamageLevel, DroneIdentity, Kinematics, FlightControl, Battery, Health, GpsPosition, EnvironmentSettings};
 use crate::drone::types::{DroneTypeRegistry, DroneTypeSpec};
 use crate::eval::trace::TraceCollector;
 use crate::world::terrain::TerrainData;
@@ -22,20 +22,14 @@ const FRICTION: f32 = 0.8;
 
 /// Apply gravity to kinematics for one time step.
 /// For auto-hold flight modes the thrust is raised to compensate.
+#[cfg(test)]
 pub fn apply_gravity_pure(
     kinematics: &mut Kinematics,
-    flight_control: &mut FlightControl,
+    _flight_control: &mut FlightControl,
     dt: f32,
-    gravity_comp: f32,
+    _gravity_comp: f32,
 ) {
-    match flight_control.mode {
-        FlightMode::AltHold | FlightMode::Loiter | FlightMode::Guided | FlightMode::Auto => {
-            flight_control.thrust = flight_control.thrust.max(gravity_comp);
-        }
-        _ => {
-            kinematics.velocity.y -= GRAVITY * dt;
-        }
-    }
+    kinematics.velocity.y -= GRAVITY * dt;
 }
 
 /// Compute total drag force (linear + quadratic) for the given velocity.
@@ -86,8 +80,10 @@ pub fn update_physics(
     mut query: Query<(&DroneIdentity, &mut Kinematics, &mut FlightControl, &mut Battery, &mut Health, &mut GpsPosition)>,
     geo: Res<GeoReference>,
     registry: Res<DroneTypeRegistry>,
+    env: Res<EnvironmentSettings>,
 ) {
     let dt = time.delta_seconds();
+    let wind = env.wind_with_turbulence();
 
     for (identity, mut kinematics, mut flight_control, mut battery, mut health, mut gps_pos) in query.iter_mut() {
         // Guard against NaN propagation from corrupted state
@@ -108,8 +104,14 @@ pub fn update_physics(
 
         let spec = registry.specs.get(&identity.drone_type).unwrap();
 
+        let air_density = env.air_density_ratio(kinematics.position.y);
+
         if !health.is_operational {
             kinematics.velocity.y -= GRAVITY * dt;
+            // Wind pushes destroyed drones too, damped by drag
+            let relative_wind = kinematics.velocity - wind;
+            let wind_drag = compute_drag(relative_wind, spec) * air_density;
+            kinematics.velocity += wind_drag / spec.airframe.mass_kg.max(0.1) * dt;
             let vel = kinematics.velocity;
             kinematics.position += vel * dt;
             kinematics.angular_velocity *= 0.95;
@@ -128,7 +130,8 @@ pub fn update_physics(
             continue;
         }
 
-        let thrust_vec = kinematics.orientation * Vec3::Y * flight_control.thrust * spec.engine.max_thrust_n;
+        // Thrust efficiency scales with air density (less thrust at altitude)
+        let thrust_vec = kinematics.orientation * Vec3::Y * flight_control.thrust * spec.engine.max_thrust_n * air_density;
         let torque = flight_control.angular_thrust * spec.engine.max_torque_nm;
 
         kinematics.angular_velocity += torque * dt;
@@ -149,8 +152,9 @@ pub fn update_physics(
         let max_tilt_angle = spec.flight_controller.max_tilt_angle_deg.to_radians();
         clamp_tilt(&mut kinematics, max_tilt_angle, flight_control.mode);
 
-        let v = kinematics.velocity;
-        let total_drag = compute_drag(v, spec);
+        // Drag uses relative wind (drone moving through air mass, not ground)
+        let relative_wind = kinematics.velocity - wind;
+        let total_drag = compute_drag(relative_wind, spec) * air_density;
 
         let acceleration = (thrust_vec + total_drag) / spec.airframe.mass_kg.max(0.1);
         kinematics.velocity += acceleration * dt;
@@ -189,20 +193,16 @@ pub fn update_physics(
 
 pub fn apply_gravity(
     time: Res<Time>,
-    mut query: Query<(&DroneIdentity, &mut Kinematics, &mut FlightControl, &Health)>,
-    registry: Res<DroneTypeRegistry>,
+    mut query: Query<(&mut Kinematics, &Health)>,
 ) {
     let dt = time.delta_seconds();
 
-    for (identity, mut kinematics, mut flight_control, health) in query.iter_mut() {
+    for (mut kinematics, health) in query.iter_mut() {
         if !health.is_operational {
             continue;
         }
 
-        let spec = registry.specs.get(&identity.drone_type).unwrap();
-        let gravity_comp = GRAVITY / spec.engine.max_thrust_n.max(1.0);
-
-        apply_gravity_pure(&mut kinematics, &mut flight_control, dt, gravity_comp);
+        kinematics.velocity.y -= GRAVITY * dt;
     }
 }
 
@@ -554,6 +554,9 @@ mod tests {
         let identity = DroneIdentity {
             id: DroneId::new(),
             drone_type: DroneType::MavicStyle,
+            name: "Test".into(),
+            serial: None,
+            fleet_id: crate::drone::FleetId(0),
         };
 
         // --- Below minor threshold (< 3 m/s) -> no damage ---
@@ -734,14 +737,9 @@ mod tests {
 
         apply_gravity_pure(&mut kinematics, &mut flight_control, 1.0, gravity_comp);
 
-        // In AltHold mode, thrust should be raised to at least gravity_comp
-        assert!(
-            flight_control.thrust >= gravity_comp,
-            "AltHold thrust should be >= gravity_comp ({}), got {}",
-            gravity_comp,
-            flight_control.thrust
+        assert_eq!(
+            kinematics.velocity.y, -GRAVITY,
+            "Gravity should apply to velocity in all modes"
         );
-        // Velocity should NOT change in auto modes
-        assert_eq!(kinematics.velocity.y, 0.0, "Velocity should not change in AltHold mode");
     }
 }

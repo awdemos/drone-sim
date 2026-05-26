@@ -1,21 +1,20 @@
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
+use bevy_egui::{egui, EguiContexts};
 use crate::core::types::{FlightMode, SimEvent, SimTimestamp};
 use crate::core::gps::GeoReference;
-use crate::drone::{DroneIdentity, Kinematics, FlightControl, MissionState};
+use crate::drone::{DroneIdentity, Kinematics, FlightControl, MissionState, FleetRegistry};
 use crate::drone::types::DroneTypeRegistry;
 use crate::eval::trace::TraceCollector;
 use crate::world::terrain::TerrainData;
 
-/// Keyboard/mouse input state for drone control
 #[derive(Resource, Default)]
 pub struct DroneInputState {
-    pub selected_drone: Option<crate::core::types::DroneId>,
     pub forward: f32,
     pub right: f32,
     pub up: f32,
     pub yaw: f32,
     pub mode_request: Option<FlightMode>,
+    pub input_captured: bool,
 }
 
 /// Process keyboard input
@@ -24,9 +23,21 @@ pub fn process_input(
     mut input_state: ResMut<DroneInputState>,
     mut egui_ctx: EguiContexts,
 ) {
-    if egui_ctx.ctx_mut().wants_keyboard_input() {
+    let Some(ctx) = egui_ctx.try_ctx_mut() else {
+        return;
+    };
+    if keyboard.just_pressed(KeyCode::Escape) {
+        ctx.memory_mut(|mem| mem.request_focus(egui::Id::new("drone_sim_nothing")));
+    }
+    if ctx.wants_keyboard_input() {
+        input_state.input_captured = true;
+        input_state.forward = 0.0;
+        input_state.right = 0.0;
+        input_state.up = 0.0;
+        input_state.yaw = 0.0;
         return;
     }
+    input_state.input_captured = false;
     input_state.forward = 0.0;
     input_state.right = 0.0;
     input_state.up = 0.0;
@@ -90,15 +101,19 @@ pub fn update_flight_mode(
     geo: Res<GeoReference>,
     terrain: Res<TerrainData>,
     registry: Res<DroneTypeRegistry>,
+    fleet_registry: Res<FleetRegistry>,
 ) {
     let _dt = time.delta_seconds();
 
     // Process and clear mode change request
     let mode_request = input_state.mode_request.take();
-    let selected_id = input_state.selected_drone;
 
     for (identity, mut flight_control, mut kinematics, mut mission_state) in query.iter_mut() {
-        let is_selected = selected_id.map(|id| id == identity.id).unwrap_or(true);
+        let is_selected = if fleet_registry.selected().is_empty() {
+            true  // No explicit selection means all drones receive input
+        } else {
+            fleet_registry.is_selected(identity.id)
+        };
 
         // Check for mode change request (only for selected drone)
         if is_selected {
@@ -119,23 +134,30 @@ pub fn update_flight_mode(
         let spec = registry.specs.get(&identity.drone_type).unwrap();
         let fc = &spec.flight_controller;
 
+        // Compute the thrust fraction needed to hover (mass * g / max_thrust)
+        let hover_thrust = (spec.airframe.mass_kg * 9.81 / spec.engine.max_thrust_n.max(0.01))
+            .clamp(0.05, 0.95);
+
         match flight_control.mode {
             FlightMode::Manual => {
+                // Direct throttle control — user sets thrust via keyboard
                 if is_selected {
                     flight_control.thrust = input_state.up.max(0.0) * fc.manual_thrust_scale + fc.manual_thrust_base;
                     flight_control.angular_thrust = Vec3::new(
                         input_state.forward * 0.5,
                         input_state.yaw * 0.5,
-                        -input_state.right * 0.5,
+                        input_state.right * 0.5,
                     );
                 }
             }
             FlightMode::Stabilize => {
+                // Self-leveling with throttle around hover point
                 if is_selected {
-                    flight_control.thrust = input_state.up.max(0.0) * fc.manual_thrust_scale + fc.stabilize_thrust_base;
+                    flight_control.thrust = input_state.up * fc.manual_thrust_scale + hover_thrust;
+                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
                     let max_tilt = fc.max_tilt_angle_deg.to_radians();
                     let target_pitch = input_state.forward * max_tilt;
-                    let target_roll = -input_state.right * max_tilt;
+                    let target_roll = input_state.right * max_tilt;
                     let target_yaw_rate = input_state.yaw * 1.0;
 
                     let (_current_yaw, current_pitch, current_roll) =
@@ -149,15 +171,16 @@ pub fn update_flight_mode(
                 }
             }
             FlightMode::AltHold => {
+                // Hold altitude at 10m with PID around hover thrust
                 let target_alt = 10.0f32;
                 let alt_error = target_alt - kinematics.position.y;
-                flight_control.thrust = fc.stabilize_thrust_base + alt_error * fc.pid_gains.altitude_p;
-                flight_control.thrust = flight_control.thrust.clamp(0.3, 0.7);
+                flight_control.thrust = hover_thrust + alt_error * fc.pid_gains.altitude_p;
+                flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
                 if is_selected {
                     let max_tilt = fc.max_tilt_angle_deg.to_radians();
                     let target_pitch = input_state.forward * max_tilt;
-                    let target_roll = -input_state.right * max_tilt;
+                    let target_roll = input_state.right * max_tilt;
                     let target_yaw_rate = input_state.yaw * 0.5;
 
                     let (_, current_pitch, current_roll) =
@@ -171,12 +194,13 @@ pub fn update_flight_mode(
                 }
             }
             FlightMode::Loiter => {
+                // Brake to zero velocity while holding altitude
                 let target_vel = Vec3::ZERO;
                 let vel_error = target_vel - kinematics.velocity;
                 let accel = vel_error * fc.pid_gains.velocity_p;
 
-                flight_control.thrust = fc.stabilize_thrust_base + accel.y * fc.pid_gains.altitude_p;
-                flight_control.thrust = flight_control.thrust.clamp(0.3, 0.8);
+                flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
                 let (_, current_pitch, current_roll) =
                     kinematics.orientation.to_euler(EulerRot::YXZ);
@@ -188,6 +212,7 @@ pub fn update_flight_mode(
                 );
             }
             FlightMode::Guided => {
+                // Fly in direction of keyboard input
                 if is_selected {
                     let target_vel = Vec3::new(
                         input_state.right * fc.cruise_speed_ms,
@@ -197,8 +222,8 @@ pub fn update_flight_mode(
                     let vel_error = target_vel - kinematics.velocity;
                     let accel = vel_error * fc.pid_gains.velocity_p;
 
-                    flight_control.thrust = fc.stabilize_thrust_base + accel.y * fc.pid_gains.altitude_p;
-                    flight_control.thrust = flight_control.thrust.clamp(0.3, 0.8);
+                    flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
                     let (_, current_pitch, current_roll) =
                         kinematics.orientation.to_euler(EulerRot::YXZ);
@@ -211,54 +236,62 @@ pub fn update_flight_mode(
                 }
             }
             FlightMode::Auto => {
-                // Follow waypoints
-                let mission_len = mission_state.mission.as_ref().map(|m| m.waypoints.len()).unwrap_or(0);
-                let loop_mission = mission_state.mission.as_ref().map(|m| m.loop_mission).unwrap_or(false);
-                
-                if let Some(mission) = mission_state.mission.as_ref() {
-                    if mission_state.current_waypoint >= mission.waypoints.len() {
-                        continue;
+                let wp_data = mission_state.mission.as_ref().and_then(|mission| {
+                    let mission_len = mission.waypoints.len();
+                    if mission_state.current_waypoint >= mission_len {
+                        return None;
                     }
                     let wp = &mission.waypoints[mission_state.current_waypoint];
-                    let wp_gps = crate::core::types::GpsCoord {
-                        latitude: wp.latitude,
-                        longitude: wp.longitude,
-                        altitude_msl: wp.altitude_agl + terrain.get_height_at_world(
-                            kinematics.position.x, kinematics.position.z
-                        ) as f64,
-                    };
-                    let wp_world = geo.gps_to_world(&wp_gps);
-                    let delta = wp_world - kinematics.position;
-                    let dist = delta.length();
-
-                    if dist < fc.waypoint_acceptance_radius_m {
-                        let idx = mission_state.current_waypoint;
-                        trace.record_event(SimEvent::WaypointReached {
-                            drone_id: identity.id,
-                            timestamp: SimTimestamp::now(),
-                            waypoint_index: idx,
-                        });
-                        mission_state.current_waypoint += 1;
-                        if mission_state.current_waypoint >= mission_len && loop_mission {
+                    Some((wp.latitude, wp.longitude, wp.altitude_agl, mission_len, mission.loop_mission))
+                });
+                let Some((wp_lat, wp_lon, wp_alt, mission_len, loop_mission)) = wp_data else {
+                    if let Some(mission) = mission_state.mission.as_ref() {
+                        if mission.loop_mission {
                             mission_state.current_waypoint = 0;
+                        } else {
+                            flight_control.mode = FlightMode::Loiter;
                         }
-                    } else {
-                        let target_vel = delta.normalize_or_zero() * fc.cruise_speed_ms;
-                        let vel_error = target_vel - kinematics.velocity;
-                        let accel = vel_error * fc.pid_gains.velocity_p;
-
-                        flight_control.thrust = fc.stabilize_thrust_base + accel.y * fc.pid_gains.altitude_p;
-                        flight_control.thrust = flight_control.thrust.clamp(0.3, 0.8);
-
-                        let (_, current_pitch, current_roll) =
-                            kinematics.orientation.to_euler(EulerRot::YXZ);
-
-                        flight_control.angular_thrust = Vec3::new(
-                            (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
-                            0.0,
-                            (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
-                        );
                     }
+                    continue;
+                };
+                let wp_gps = crate::core::types::GpsCoord {
+                    latitude: wp_lat,
+                    longitude: wp_lon,
+                    altitude_msl: wp_alt + terrain.get_height_at_world(
+                        kinematics.position.x, kinematics.position.z
+                    ) as f64,
+                };
+                let wp_world = geo.gps_to_world(&wp_gps);
+                let delta = wp_world - kinematics.position;
+                let dist = delta.length();
+
+                if dist < fc.waypoint_acceptance_radius_m {
+                    let idx = mission_state.current_waypoint;
+                    trace.record_event(SimEvent::WaypointReached {
+                        drone_id: identity.id,
+                        timestamp: SimTimestamp::now(),
+                        waypoint_index: idx,
+                    });
+                    mission_state.current_waypoint += 1;
+                    if mission_state.current_waypoint >= mission_len && loop_mission {
+                        mission_state.current_waypoint = 0;
+                    }
+                } else {
+                    let target_vel = delta.normalize_or_zero() * fc.cruise_speed_ms;
+                    let vel_error = target_vel - kinematics.velocity;
+                    let accel = vel_error * fc.pid_gains.velocity_p;
+
+                    flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
+
+                    let (_, current_pitch, current_roll) =
+                        kinematics.orientation.to_euler(EulerRot::YXZ);
+
+                    flight_control.angular_thrust = Vec3::new(
+                        (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
+                        0.0,
+                        (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
+                    );
                 }
             }
             FlightMode::Rtl => {
@@ -274,8 +307,8 @@ pub fn update_flight_mode(
                     let vel_error = target_vel - kinematics.velocity;
                     let accel = vel_error * fc.pid_gains.velocity_p;
 
-                    flight_control.thrust = fc.stabilize_thrust_base + accel.y * fc.pid_gains.altitude_p;
-                    flight_control.thrust = flight_control.thrust.clamp(0.3, 0.8);
+                    flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
                     let (_, current_pitch, current_roll) =
                         kinematics.orientation.to_euler(EulerRot::YXZ);
@@ -288,7 +321,7 @@ pub fn update_flight_mode(
                 }
             }
             FlightMode::Land => {
-                // Descend to ground
+                // Descend to ground (gravity is applied separately for Land)
                 let ground = terrain.get_height_at_world(kinematics.position.x, kinematics.position.z);
                 let alt_agl = kinematics.position.y - ground;
 
@@ -298,8 +331,8 @@ pub fn update_flight_mode(
                     flight_control.angular_thrust = Vec3::ZERO;
                 } else {
                     let target_descent = (alt_agl * 0.5).min(fc.land_descent_rate_ms);
-                    flight_control.thrust = fc.stabilize_thrust_base - target_descent * fc.pid_gains.altitude_p;
-                    flight_control.thrust = flight_control.thrust.clamp(0.2, 0.6);
+                    flight_control.thrust = hover_thrust - target_descent * fc.pid_gains.altitude_p;
+                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
                     flight_control.angular_thrust = Vec3::new(
                         -kinematics.orientation.to_euler(EulerRot::YXZ).1 * fc.pid_gains.attitude_p,
                         0.0,
