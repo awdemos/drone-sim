@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::core::mercator::*;
 use crate::ui::{ReloadWorldEvent, UiPreferences};
-use crate::drone::SpawnDroneEvent;
+use crate::drone::{FleetRegistry, SpawnDroneEvent};
 
 pub struct MapTilePlugin;
 
@@ -78,6 +78,9 @@ pub struct MapTileState {
     pub provider: MapProvider,
     pub show_grid: bool,
     pub show_labels: bool,
+    pub show_trails: bool,
+    pub dragging_drone: Option<crate::core::types::DroneId>,
+    pub pending_drag_move: Option<(crate::core::types::DroneId, Vec3)>,
 }
 
 impl Default for MapTileState {
@@ -94,6 +97,9 @@ impl Default for MapTileState {
             provider: MapProvider::EsriSatellite,
             show_grid: true,
             show_labels: true,
+            show_trails: true,
+            dragging_drone: None,
+            pending_drag_move: None,
         }
     }
 }
@@ -335,14 +341,18 @@ pub fn map_panel(
     mut contexts: EguiContexts,
     mut tile_state: ResMut<MapTileState>,
     mut retry_queue: ResMut<TileRetryQueue>,
-    mut input_state: ResMut<crate::drone::controller::DroneInputState>,
+    mut fleet_registry: ResMut<FleetRegistry>,
     mut drone_query: Query<(Entity, &crate::drone::DroneIdentity, &crate::drone::Kinematics, &mut crate::drone::MissionState, &mut crate::drone::FlightControl)>,
+    trail_query: Query<&crate::drone::FlightTrail, With<crate::drone::DroneIdentity>>,
     geo: Res<crate::core::gps::GeoReference>,
     mut navigate_events: EventWriter<ReloadWorldEvent>,
     ui_prefs: Res<UiPreferences>,
     mut spawn_events: EventWriter<SpawnDroneEvent>,
 ) {
-    egui::CentralPanel::default().show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::CentralPanel::default().show(ctx, |ui| {
             // ── Map style controls ──
             ui.horizontal(|ui| {
                 ui.label("Style:");
@@ -366,6 +376,7 @@ pub fn map_panel(
             ui.horizontal(|ui| {
                 ui.checkbox(&mut tile_state.show_grid, "Grid lines");
                 ui.checkbox(&mut tile_state.show_labels, "Labels");
+                ui.checkbox(&mut tile_state.show_trails, "Trails");
             });
 
             ui.separator();
@@ -384,9 +395,28 @@ pub fn map_panel(
             };
 
             if response.dragged() {
-                let delta = response.drag_delta();
-                tile_state.center_pixel_x -= delta.x as f64;
-                tile_state.center_pixel_y -= delta.y as f64;
+                if tile_state.dragging_drone.is_some() {
+                    if let Some(mouse) = response.interact_pointer_pos() {
+                        let mouse_px = tile_state.center_pixel_x + (mouse.x - rect.center().x) as f64;
+                        let mouse_py = tile_state.center_pixel_y + (mouse.y - rect.center().y) as f64;
+                        let (lat, lon) = pixel_to_lat_lon(mouse_px, mouse_py, tile_state.zoom);
+                        let new_pos = geo.gps_to_world(&crate::core::types::GpsCoord {
+                            latitude: lat,
+                            longitude: lon,
+                            altitude_msl: 0.0,
+                        });
+                        let drag_id = tile_state.dragging_drone.unwrap();
+                        tile_state.pending_drag_move = Some((drag_id, new_pos));
+                    }
+                } else {
+                    let delta = response.drag_delta();
+                    tile_state.center_pixel_x -= delta.x as f64;
+                    tile_state.center_pixel_y -= delta.y as f64;
+                }
+            }
+
+            if response.drag_stopped() {
+                tile_state.dragging_drone = None;
             }
 
             if scroll.abs() > 0.5 {
@@ -456,12 +486,7 @@ pub fn map_panel(
             let painter = ui.painter();
 
             let visible_tiles = (max_tx - min_tx + 1) * (max_ty - min_ty + 1);
-            let ready_count = tile_state.tiles.values().filter(|s| matches!(s, TileState::Ready(_, _))).count();
-            let loading_count = tile_state.tiles.values().filter(|s| matches!(s, TileState::Loading)).count();
-            let failed_count = tile_state.tiles.values().filter(|s| matches!(s, TileState::Failed)).count();
-            println!("Minimap render: zoom={}, visible={}x{}={} tiles | ready={}, loading={}, failed={}",
-                tile_state.zoom, max_tx - min_tx + 1, max_ty - min_ty + 1, visible_tiles,
-                ready_count, loading_count, failed_count);
+            let _ = visible_tiles;
 
             let bg_color = match tile_state.provider {
                 MapProvider::CartoDark => egui::Color32::from_rgb(20, 25, 30),
@@ -564,10 +589,32 @@ pub fn map_panel(
             }
 
             // ── Draw drones on top ──
+            let mut hover_drone: Option<crate::core::types::DroneId> = None;
+            if let Some(mouse) = response.hover_pos() {
+            for (_entity, identity, kinematics, _mission_state, _flight_control) in drone_query.iter() {
+                    let gps = geo.world_to_gps(kinematics.position);
+                    let (px, py) = lat_lon_to_pixel(gps.latitude, gps.longitude, tile_state.zoom);
+                    let sx = px - tl_px + rect.min.x as f64;
+                    let sy = py - tl_py + rect.min.y as f64;
+                    let pos = egui::pos2(sx as f32, sy as f32);
+                    if (mouse - pos).length_sq() < 144.0 {
+                        hover_drone = Some(identity.id);
+                        break;
+                    }
+                }
+            }
+
+            if response.drag_started() {
+                if let Some(drone_id) = hover_drone {
+                    tile_state.dragging_drone = Some(drone_id);
+                    fleet_registry.select_single(drone_id);
+                }
+            }
+
             let mut clicked_drone: Option<crate::core::types::DroneId> = None;
             let click_pos = response.interact_pointer_pos();
 
-            for (_entity, identity, kinematics, _mission_state, _flight_control) in drone_query.iter() {
+            for (entity, identity, kinematics, _mission_state, _flight_control) in drone_query.iter() {
                 let gps = geo.world_to_gps(kinematics.position);
                 let (px, py) = lat_lon_to_pixel(gps.latitude, gps.longitude, tile_state.zoom);
                 let screen_x = px - tl_px + rect.min.x as f64;
@@ -582,7 +629,7 @@ pub fn map_panel(
                 }
 
                 let pos = egui::pos2(screen_x as f32, screen_y as f32);
-                let is_selected = input_state.selected_drone == Some(identity.id);
+                let is_selected = fleet_registry.is_selected(identity.id);
                 let dot_radius = if is_selected { 8.0 } else { 5.0 };
 
                 painter.circle_filled(pos, dot_radius, egui::Color32::RED);
@@ -610,22 +657,54 @@ pub fn map_panel(
 
                 // Drone label
                 if tile_state.show_labels {
-                    let id_str = format!("{:?}", identity.id.0);
                     painter.text(
                         pos + egui::Vec2::new(0.0, -12.0),
                         egui::Align2::CENTER_BOTTOM,
-                        &format!("Drone {}", &id_str[..id_str.len().min(6)]),
+                        &identity.name,
                         egui::FontId::proportional(10.0),
                         egui::Color32::WHITE,
                     );
+                }
+
+                if tile_state.show_trails {
+                    if let Ok(trail) = trail_query.get(entity) {
+                        if trail.points.len() >= 2 {
+                            let screen_pts: Vec<egui::Pos2> = trail.points.iter()
+                                .filter_map(|p| {
+                                    let tg = geo.world_to_gps(*p);
+                                    let (tpx, tpy) = lat_lon_to_pixel(tg.latitude, tg.longitude, tile_state.zoom);
+                                    let sx = tpx - tl_px + rect.min.x as f64;
+                                    let sy = tpy - tl_py + rect.min.y as f64;
+                                    if sx >= rect.min.x as f64 - 10.0 && sx <= rect.max.x as f64 + 10.0
+                                        && sy >= rect.min.y as f64 - 10.0 && sy <= rect.max.y as f64 + 10.0
+                                    {
+                                        Some(egui::pos2(sx as f32, sy as f32))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if screen_pts.len() >= 2 {
+                                let trail_color = if is_selected {
+                                    egui::Color32::from_rgba_unmultiplied(255, 200, 50, 120)
+                                } else {
+                                    egui::Color32::from_rgba_unmultiplied(255, 80, 80, 80)
+                                };
+                                for pair in screen_pts.windows(2) {
+                                    painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.5, trail_color));
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             if response.clicked() {
                 if let Some(drone_id) = clicked_drone {
-                    input_state.selected_drone = Some(drone_id);
+                    fleet_registry.select_single(drone_id);
                 } else if let Some(mouse) = click_pos {
-                    if let Some(selected_id) = input_state.selected_drone {
+                    let selected_ids: Vec<crate::core::types::DroneId> = fleet_registry.selected().iter().copied().collect();
+                    if let Some(&selected_id) = selected_ids.first() {
                         let mouse_px = tl_px + (mouse.x - rect.min.x) as f64;
                         let mouse_py = tl_py + (mouse.y - rect.min.y) as f64;
                         let (lat, lon) = pixel_to_lat_lon(mouse_px, mouse_py, tile_state.zoom);
@@ -667,11 +746,22 @@ pub fn map_panel(
                     let mouse_px = tl_px + (mouse.x - rect.min.x) as f64;
                     let mouse_py = tl_py + (mouse.y - rect.min.y) as f64;
                     let (lat, lon) = pixel_to_lat_lon(mouse_px, mouse_py, tile_state.zoom);
+                    let alt: f64 = ui_prefs.spawn_alt.parse().unwrap_or(20.0);
                     spawn_events.send(SpawnDroneEvent {
                         lat,
                         lon,
+                        alt,
                         drone_type: ui_prefs.selected_spawn_type,
                     });
+                    let spawn_pos = egui::pos2(mouse.x, mouse.y);
+                    painter.circle(spawn_pos, 16.0, egui::Color32::from_rgba_unmultiplied(0, 255, 100, 80), egui::Stroke::new(2.0, egui::Color32::GREEN));
+                    painter.text(
+                        spawn_pos + egui::Vec2::new(0.0, -20.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        "SPAWNED",
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::GREEN,
+                    );
                 }
             }
 
@@ -709,9 +799,25 @@ pub fn map_panel(
             painter.text(
                 rect.left_bottom() + egui::Vec2::new(10.0, -10.0),
                 egui::Align2::LEFT_BOTTOM,
-                &format!("Zoom: {} | Drag to pan | Scroll to zoom | Right-click to navigate", tile_state.zoom),
+                &format!("Zoom: {} | Drag=pan | Scroll=zoom | Right-click=navigate | Dbl-click=spawn", tile_state.zoom),
                 egui::FontId::proportional(11.0),
                 egui::Color32::LIGHT_GRAY,
             );
         });
+}
+
+pub fn apply_map_drag(
+    mut tile_state: ResMut<MapTileState>,
+    mut drone_query: Query<(&crate::drone::DroneIdentity, &mut crate::drone::Kinematics)>,
+) {
+    if let Some((drag_id, new_pos)) = tile_state.pending_drag_move.take() {
+        for (identity, mut kinematics) in drone_query.iter_mut() {
+            if identity.id == drag_id {
+                kinematics.position.x = new_pos.x;
+                kinematics.position.z = new_pos.z;
+                kinematics.velocity = bevy::prelude::Vec3::ZERO;
+                break;
+            }
+        }
+    }
 }

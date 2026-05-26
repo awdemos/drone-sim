@@ -103,10 +103,12 @@ impl SpatialGrid {
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SpatialGrid::new(50.0))
+            .insert_resource(DayNightCycle::default())
             .add_plugins(satellite_terrain::SatelliteTerrainPlugin)
             .add_plugins(earth_backdrop::EarthBackdropPlugin)
             .add_systems(Startup, setup_lighting)
             .add_systems(Startup, setup_environment.after(setup_lighting))
+            .add_systems(Update, update_day_night)
             .add_systems(Update, despawn_world_entities.after(crate::handle_reload_world))
             .add_systems(Update, reload_osm_data.after(despawn_world_entities));
     }
@@ -157,6 +159,9 @@ pub fn reload_osm_data(
     }
 }
 
+#[derive(Component)]
+pub struct SunLight;
+
 fn setup_lighting(mut commands: Commands) {
     commands.spawn((
         DirectionalLightBundle {
@@ -170,6 +175,7 @@ fn setup_lighting(mut commands: Commands) {
             transform: Transform::from_xyz(100.0, 200.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
+        SunLight,
         WorldEntity,
     ));
 
@@ -177,6 +183,71 @@ fn setup_lighting(mut commands: Commands) {
         color: Color::srgb(0.8, 0.9, 1.0),
         brightness: 0.4,
     });
+}
+
+#[derive(Resource)]
+pub struct DayNightCycle {
+    pub enabled: bool,
+    pub time_speed: f32,
+    pub latitude_deg: f32,
+}
+
+impl Default for DayNightCycle {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            time_speed: 1.0,
+            latitude_deg: 37.77,
+        }
+    }
+}
+
+fn update_day_night(
+    mut sun_transform: Query<&mut Transform, With<SunLight>>,
+    mut sun_light: Query<&mut DirectionalLight, With<SunLight>>,
+    mut ambient: ResMut<AmbientLight>,
+    mut clear_color: ResMut<ClearColor>,
+    day_night: Res<DayNightCycle>,
+    world_config: Res<crate::core::config::WorldConfig>,
+) {
+    if !day_night.enabled {
+        return;
+    }
+
+    let now = chrono::Utc::now();
+    let hour_utc = (now.timestamp() % 86400) as f32 / 3600.0;
+    let lat = world_config.origin_lat as f32;
+
+    let solar_angle = (hour_utc / 24.0 * std::f32::consts::TAU) - std::f32::consts::PI;
+    let elevation = solar_angle.sin() * lat.to_radians().cos();
+    let azimuth = solar_angle.cos();
+
+    let sun_distance = 300.0;
+    let sun_y = elevation * sun_distance;
+    let sun_x = azimuth * sun_distance;
+
+    if let Ok(mut transform) = sun_transform.get_single_mut() {
+        *transform = Transform::from_xyz(sun_x, sun_y.max(5.0), 50.0)
+            .looking_at(Vec3::ZERO, Vec3::Y);
+    }
+
+    let day_factor = ((elevation * 3.0).clamp(-1.0, 1.0) * 0.5 + 0.5).clamp(0.0, 1.0);
+
+    if let Ok(mut light) = sun_light.get_single_mut() {
+        light.illuminance = 1_000.0 + day_factor * 99_000.0;
+    }
+
+    ambient.brightness = 0.05 + day_factor * 0.45;
+    ambient.color = Color::srgb(
+        0.3 + day_factor * 0.5,
+        0.3 + day_factor * 0.6,
+        0.4 + day_factor * 0.5,
+    );
+
+    let sky_r = 0.05 + day_factor * 0.30;
+    let sky_g = 0.05 + day_factor * 0.50;
+    let sky_b = 0.15 + day_factor * 0.65;
+    clear_color.0 = Color::srgb(sky_r, sky_g, sky_b);
 }
 
 fn setup_environment(
