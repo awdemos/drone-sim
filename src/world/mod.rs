@@ -116,7 +116,7 @@ impl Plugin for WorldPlugin {
 
 pub fn despawn_world_entities(
     mut commands: Commands,
-    mut events: EventReader<crate::DespawnWorldEvent>,
+    mut events: EventReader<crate::events::DespawnWorldEvent>,
     world_entities: Query<Entity, With<WorldEntity>>,
     mut spatial_grid: ResMut<SpatialGrid>,
 ) {
@@ -129,7 +129,7 @@ pub fn despawn_world_entities(
 }
 
 pub fn reload_osm_data(
-    mut events: EventReader<crate::ReloadOsmEvent>,
+    mut events: EventReader<crate::events::ReloadOsmEvent>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,

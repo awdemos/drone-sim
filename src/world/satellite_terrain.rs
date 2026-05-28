@@ -23,7 +23,7 @@ impl Plugin for SatelliteTerrainPlugin {
 }
 
 pub fn reset_terrain_state(
-    mut events: EventReader<crate::DespawnWorldEvent>,
+    mut events: EventReader<crate::events::DespawnWorldEvent>,
     mut terrain_state: ResMut<SatelliteTerrainState>,
 ) {
     for _ in events.read() {

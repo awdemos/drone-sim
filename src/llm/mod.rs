@@ -30,7 +30,7 @@ impl Plugin for LlmPlugin {
 }
 
 pub fn clear_llm_data(
-    mut events: EventReader<crate::ClearDroneDataEvent>,
+    mut events: EventReader<crate::events::ClearDroneDataEvent>,
     mut reasoning: ResMut<ReasoningTrace>,
 ) {
     for _ in events.read() {
@@ -121,8 +121,14 @@ fn spawn_llm_tasks(
     };
     let system_prompt = config.system_prompt.clone();
 
-    for (identity, kinematics, flight_control, battery, _health, _mission_state) in query.iter() {
+    for (identity, kinematics, flight_control, battery, _health, mission_state) in query.iter() {
         let spec = registry.specs.get(&identity.drone_type).unwrap();
+        let mission_context = mission_state.mission.as_ref().map(|m| serde_json::json!({
+            "waypoint_count": m.waypoints.len(),
+            "current_waypoint": mission_state.current_waypoint,
+            "looping": m.loop_mission,
+        }));
+
         let context = serde_json::json!({
             "drone_id": identity.id,
             "drone_type": format!("{:?}", identity.drone_type),
@@ -142,6 +148,7 @@ fn spawn_llm_tasks(
                 "battery": battery.percent,
                 "flight_mode": format!("{:?}", flight_control.mode),
             },
+            "mission": mission_context,
             "camera_available": true,
         });
 
@@ -267,48 +274,89 @@ fn parse_llm_response(text: &str) -> (String, String, f32) {
 /// Apply LLM decisions to drones
 fn apply_llm_decisions(
     mut queue: ResMut<LlmDecisionQueue>,
-    mut query: Query<(&DroneIdentity, &mut Kinematics, &mut FlightControl)>,
+    mut query: Query<(&DroneIdentity, &mut Kinematics, &mut FlightControl, &mut MissionState)>,
 ) {
     let decisions: Vec<LlmDecision> = queue.pending.drain(..).collect();
     
     for decision in decisions {
-        for (identity, kinematics, mut flight_control) in query.iter_mut() {
+        for (identity, _kinematics, mut flight_control, mut mission_state) in query.iter_mut() {
             if identity.id == decision.drone_id {
                 match decision.action.as_str() {
                     "move_forward" => {
-                        let forward = kinematics.orientation * Vec3::Z;
+                        let forward = _kinematics.orientation * Vec3::Z;
                         flight_control.target_velocity = forward * 5.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "move_back" => {
-                        let back = kinematics.orientation * -Vec3::Z;
+                        let back = _kinematics.orientation * -Vec3::Z;
                         flight_control.target_velocity = back * 5.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "move_left" => {
-                        let left = kinematics.orientation * -Vec3::X;
+                        let left = _kinematics.orientation * -Vec3::X;
                         flight_control.target_velocity = left * 5.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "move_right" => {
-                        let right = kinematics.orientation * Vec3::X;
+                        let right = _kinematics.orientation * Vec3::X;
                         flight_control.target_velocity = right * 5.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "ascend" => {
                         flight_control.target_velocity.y = 2.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "descend" => {
                         flight_control.target_velocity.y = -2.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "rotate_cw" => {
                         flight_control.angular_thrust.y = -1.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "rotate_ccw" => {
                         flight_control.angular_thrust.y = 1.0;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "hover" | "stop" => {
                         flight_control.target_velocity = Vec3::ZERO;
                         flight_control.angular_thrust = Vec3::ZERO;
+                        flight_control.mode = crate::core::types::FlightMode::Guided;
                     }
                     "land" => {
                         flight_control.mode = crate::core::types::FlightMode::Land;
+                    }
+                    "navigate_to" => {
+                        if let Some(raw) = &decision.raw_response {
+                            if let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}')) {
+                                let json_str = &raw[start..=end];
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    if let (Some(lat), Some(lon), Some(alt)) = (
+                                        json["target_lat"].as_f64(),
+                                        json["target_lon"].as_f64(),
+                                        json["target_alt_agl"].as_f64(),
+                                    ) {
+                                        mission_state.mission = Some(crate::core::types::Mission {
+                                            name: "LLM Navigation".to_string(),
+                                            waypoints: vec![crate::core::types::Waypoint {
+                                                latitude: lat,
+                                                longitude: lon,
+                                                altitude_agl: alt,
+                                                hold_time_secs: 0.0,
+                                            }],
+                                            loop_mission: false,
+                                        });
+                                        mission_state.current_waypoint = 0;
+                                        flight_control.mode = crate::core::types::FlightMode::Auto;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "follow_mission" => {
+                        if mission_state.mission.is_some() {
+                            flight_control.mode = crate::core::types::FlightMode::Auto;
+                        }
                     }
                     _ => {
                         flight_control.target_velocity = Vec3::ZERO;

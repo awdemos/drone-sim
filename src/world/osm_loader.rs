@@ -73,6 +73,19 @@ pub fn load_osm_data(path: &std::path::Path, geo: &GeoReference) -> anyhow::Resu
     Ok(generate_procedural_city(geo))
 }
 
+/// Load OSM data from the given path, or fall back to procedural city generation.
+pub fn load_osm_with_fallback(path: Option<&std::path::Path>, geo: &GeoReference) -> OsmData {
+    match path {
+        Some(p) => load_osm_data(p, geo).unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to load OSM data: {}. Using procedural city.", e);
+            load_osm_data(std::path::Path::new(""), geo)
+                .expect("procedural city generation should never fail")
+        }),
+        None => load_osm_data(std::path::Path::new(""), geo)
+            .expect("procedural city generation should never fail"),
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct OverpassResponse {
     elements: Vec<OverpassElement>,

@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiSet};
-use crate::core::types::{DroneId, DroneType, FlightMode, CameraMode};
+use crate::core::types::{DroneId, DroneType, FlightMode};
+use crate::camera::CameraMode;
 use crate::drone::{DroneIdentity, FleetId, FleetRegistry, Kinematics, GpsPosition, FlightControl, Battery, Health, DamageLevel, MissionState, EnvironmentSettings, SpawnDroneEvent, controller::{DroneInputState, process_input, update_flight_mode}, camera::DroneCameraMap};
 use crate::eval::metrics::MetricsCollector;
 use crate::eval::trace::TraceCollector;
@@ -29,13 +30,31 @@ pub struct MissionPlannerState {
     pub loop_mission: bool,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct UiPreferences {
     pub llm_enabled: bool,
     pub selected_spawn_type: DroneType,
     pub spawn_lat: String,
     pub spawn_lon: String,
     pub spawn_alt: String,
+    pub formation_idx: usize,
+    pub formation_spread: f32,
+    pub formation_active: bool,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            llm_enabled: false,
+            selected_spawn_type: DroneType::MavicStyle,
+            spawn_lat: "37.7749".to_string(),
+            spawn_lon: "-122.4194".to_string(),
+            spawn_alt: "50".to_string(),
+            formation_idx: 0,
+            formation_spread: 10.0,
+            formation_active: false,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -49,6 +68,12 @@ pub struct PanelVisibility {
     pub mission_planner: bool,
     pub environment: bool,
     pub camera_feed_show_all: bool,
+    pub camera_feed_fullscreen: bool,
+    pub map: bool,
+    pub show_airspace: bool,
+    pub show_mission: bool,
+    pub show_config: bool,
+    pub help: bool,
 }
 
 impl Default for PanelVisibility {
@@ -63,6 +88,12 @@ impl Default for PanelVisibility {
             mission_planner: false,
             environment: false,
             camera_feed_show_all: false,
+            camera_feed_fullscreen: false,
+            map: true,
+            show_airspace: false,
+            show_mission: false,
+            show_config: false,
+            help: false,
         }
     }
 }
@@ -88,8 +119,10 @@ impl Plugin for UiPlugin {
             .add_systems(Update, camera_feed_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
             .add_systems(Update, mission_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
             .add_systems(Update, environment_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
+            .add_systems(Update, config_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
             .add_systems(Update, map_tiles::map_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
-.add_systems(Update, map_tiles::apply_map_drag.run_if(resource_exists::<crate::splash::AppReady>))
+            .add_systems(Update, map_tiles::apply_map_drag.run_if(resource_exists::<crate::splash::AppReady>))
+            .add_systems(Update, help_panel.run_if(resource_exists::<crate::splash::AppReady>).after(EguiSet::InitContexts))
             .add_systems(Update, clear_minimap_on_reload.after(crate::handle_reload_world))
             .add_systems(Update, cleanup_tile_download_tasks.after(crate::handle_reload_world));
     }
@@ -99,13 +132,15 @@ fn top_menu_bar(
     mut contexts: EguiContexts,
     mut panel_vis: ResMut<PanelVisibility>,
     camera_mode: Res<CameraMode>,
-    time: Res<Time>,
 ) {
-    let elapsed = time.elapsed_seconds();
-    let hours = (elapsed / 3600.0) as u32;
-    let minutes = ((elapsed % 3600.0) / 60.0) as u32;
-    let seconds = (elapsed % 60.0) as u32;
-    let time_str = format!("{:02}:{:02}:{:02}", hours, minutes, seconds);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let hours = (secs / 3600) % 24;
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    let time_str = format!("UTC {:02}:{:02}:{:02}", hours, minutes, seconds);
 
     egui::TopBottomPanel::top("top_menu").show(contexts.ctx_mut(), |ui| {
         egui::menu::bar(ui, |ui| {
@@ -119,10 +154,15 @@ fn top_menu_bar(
             toggle(ui, "Telemetry", &mut panel_vis.telemetry);
             toggle(ui, "Camera", &mut panel_vis.camera_feeds);
             toggle(ui, "Mission", &mut panel_vis.mission_planner);
-            toggle(ui, "Map", &mut panel_vis.navigate);
+            toggle(ui, "Mission IO", &mut panel_vis.show_mission);
+            toggle(ui, "Map", &mut panel_vis.map);
+            toggle(ui, "Nav", &mut panel_vis.navigate);
             toggle(ui, "Env", &mut panel_vis.environment);
             toggle(ui, "LLM", &mut panel_vis.llm_reasoning);
             toggle(ui, "Metrics", &mut panel_vis.metrics);
+            toggle(ui, "Airspace", &mut panel_vis.show_airspace);
+            toggle(ui, "Config", &mut panel_vis.show_config);
+            toggle(ui, "Help", &mut panel_vis.help);
 
             ui.separator();
 
@@ -140,7 +180,7 @@ fn top_menu_bar(
 }
 
 pub fn clear_minimap_on_reload(
-    mut events: EventReader<crate::ReloadOsmEvent>,
+    mut events: EventReader<crate::events::ReloadOsmEvent>,
     mut tile_state: ResMut<map_tiles::MapTileState>,
 ) {
     for event in events.read() {
@@ -152,7 +192,7 @@ pub fn clear_minimap_on_reload(
 }
 
 pub fn cleanup_tile_download_tasks(
-    mut events: EventReader<crate::DespawnWorldEvent>,
+    mut events: EventReader<crate::events::DespawnWorldEvent>,
     mut commands: Commands,
     minimap_tasks: Query<Entity, With<map_tiles::TileDownloadTask>>,
 ) {
@@ -307,6 +347,23 @@ fn drone_panel(
                 }
             });
 
+            ui.separator();
+            ui.label("Formation");
+            let formations = ["None", "Line", "Diamond", "V-Shape", "Circle"];
+            egui::ComboBox::from_id_source("formation")
+                .selected_text(formations[ui_state.formation_idx])
+                .show_ui(ui, |ui| {
+                    for (i, name) in formations.iter().enumerate() {
+                        if ui.selectable_label(i == ui_state.formation_idx, *name).clicked() {
+                            ui_state.formation_idx = i;
+                        }
+                    }
+                });
+            ui.add(egui::Slider::new(&mut ui_state.formation_spread, 5.0..=50.0).text("Spread (m)"));
+            if ui.button("Apply Formation").clicked() {
+                ui_state.formation_active = ui_state.formation_idx > 0;
+            }
+
             for (identity, flight_control, health, battery) in drone_query.iter() {
                 let is_selected = fleet_registry.is_selected(identity.id);
                 let serial_str = identity.serial.as_deref().unwrap_or("");
@@ -364,7 +421,8 @@ fn drone_panel(
 
 fn telemetry_panel(
     mut contexts: EguiContexts,
-    drone_query: Query<(&DroneIdentity, &Kinematics, &GpsPosition, &Health, &Battery)>,
+    drone_query: Query<(&DroneIdentity, &Kinematics, &GpsPosition, &Health, &Battery, Option<&crate::drone::physics::AirspaceViolation>)>,
+    mut kml_exporter: ResMut<crate::export::KmlExporter>,
     panel_vis: Res<PanelVisibility>,
 ) {
     if !panel_vis.telemetry {
@@ -377,7 +435,7 @@ fn telemetry_panel(
         .default_pos([10.0, 240.0])
         .default_size([320.0, 180.0])
         .show(ctx, |ui| {
-        for (identity, kinematics, gps, health, battery) in drone_query.iter() {
+        for (identity, kinematics, gps, health, battery, violation_opt) in drone_query.iter() {
             ui.group(|ui| {
                 ui.label(format!("Position: {:.1}, {:.1}, {:.1}",
                     kinematics.position.x, kinematics.position.y, kinematics.position.z));
@@ -403,6 +461,29 @@ fn telemetry_panel(
                     ui.label("Health:");
                     ui.colored_label(health_color, format!("{:.0}%", health.health_percent));
                 });
+
+                let battery_color = if battery.percent > 50.0 {
+                    egui::Color32::GREEN
+                } else if battery.percent > 25.0 {
+                    egui::Color32::YELLOW
+                } else if battery.percent > 10.0 {
+                    egui::Color32::from_rgb(255, 140, 0)
+                } else {
+                    egui::Color32::RED
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Battery:");
+                    ui.colored_label(battery_color, format!("{:.1}% ({:.0}mAh)", battery.percent, battery.current_charge_mah));
+                });
+
+                if let Some(violation) = violation_opt {
+                    if violation.in_no_fly {
+                        ui.colored_label(egui::Color32::RED, format!("⚠ NO-FLY ZONE: {}", violation.zone_name));
+                    } else if violation.in_height_restricted {
+                        ui.colored_label(egui::Color32::from_rgb(255, 140, 0), format!("⚠ HEIGHT RESTRICTED: {} (max {}ft)", violation.zone_name, violation.max_altitude_ft.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "?".to_string())));
+                    }
+                }
+
                 if health.last_impact_velocity > 0.1 {
                     ui.label(format!("Last Impact: {:.1} m/s", health.last_impact_velocity));
                 }
@@ -410,11 +491,26 @@ fn telemetry_panel(
                     ui.colored_label(egui::Color32::RED, "NOT OPERATIONAL");
                 }
                 ui.label(format!("Type: {:?}", identity.drone_type));
-                if let Some(serial) = &identity.serial {
-                    ui.label(format!("S/N: {}", serial));
-                }
-                ui.label(format!("Battery: {:.1}% ({:.0}mAh)", battery.percent, battery.current_charge_mah));
             });
+        }
+
+        ui.separator();
+        ui.heading("KML Export");
+        if kml_exporter.is_exporting {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::GREEN, "● Recording");
+                if ui.button("Stop").clicked() {
+                    kml_exporter.stop_export();
+                }
+            });
+        } else {
+            if ui.button("Start KML Export").clicked() {
+                use chrono::Local;
+                let ts = Local::now().format("%Y%m%d_%H%M%S");
+                let path = format!("data/exports/{}_flight.kml", ts);
+                let _ = std::fs::create_dir_all("data/exports");
+                kml_exporter.start_export(path);
+            }
         }
     });
 }
@@ -603,11 +699,23 @@ fn camera_feed_panel(
         }
     }
 
+    let fullscreen = panel_vis.camera_feed_fullscreen;
+    let (default_pos, default_size, image_size) = if fullscreen {
+        ([20.0, 20.0], [1240.0, 840.0], [1200.0, 750.0])
+    } else {
+        ([660.0, 40.0], [320.0, 240.0], [280.0, 180.0])
+    };
+
     egui::Window::new("Camera Feed")
-        .default_pos([660.0, 40.0])
-        .default_size([320.0, 240.0])
+        .default_pos(default_pos)
+        .default_size(default_size)
         .show(contexts.ctx_mut(), |ui| {
-            ui.checkbox(&mut panel_vis.camera_feed_show_all, "Show all drones");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut panel_vis.camera_feed_show_all, "Show all drones");
+                if ui.button(if fullscreen { "Exit Fullscreen" } else { "Fullscreen" }).clicked() {
+                    panel_vis.camera_feed_fullscreen = !fullscreen;
+                }
+            });
             ui.separator();
             if textures_to_show.is_empty() {
                 ui.label("No drone selected. Select a drone to see its camera.");
@@ -624,7 +732,7 @@ fn camera_feed_panel(
                     egui::RichText::new(label).weak()
                 };
                 ui.label(rich);
-                ui.image(egui::load::SizedTexture::new(*texture_id, [280.0, 180.0]));
+                ui.image(egui::load::SizedTexture::new(*texture_id, image_size));
                 ui.separator();
             }
         });
@@ -740,6 +848,12 @@ fn environment_panel(
                 .text("Wind Dir (°)"));
             ui.add(egui::Slider::new(&mut env.turbulence, 0.0..=1.0)
                 .text("Turbulence"));
+            ui.add(egui::Slider::new(&mut env.gust_factor, 0.0..=1.0)
+                .text("Gust Factor"));
+            ui.add(egui::Slider::new(&mut env.rain_intensity, 0.0..=1.0)
+                .text("Rain Intensity"));
+            ui.add(egui::Slider::new(&mut env.icing_factor, 0.0..=1.0)
+                .text("Icing Factor"));
 
             ui.separator();
             ui.label("Atmosphere");
@@ -764,4 +878,138 @@ fn environment_panel(
                 ui.label("Calm");
             }
         });
+}
+
+fn config_panel(
+    mut contexts: EguiContexts,
+    mut physics_config: ResMut<crate::core::config::PhysicsConfig>,
+    mut llm_config: ResMut<crate::core::config::LlmConfig>,
+    mut env: ResMut<EnvironmentSettings>,
+    panel_vis: Res<PanelVisibility>,
+) {
+    if !panel_vis.show_config {
+        return;
+    }
+    egui::Window::new("Config Editor")
+        .default_pos([340.0, 20.0])
+        .default_size([300.0, 400.0])
+        .show(contexts.ctx_mut(), |ui| {
+            ui.heading("Physics");
+            ui.add(egui::Slider::new(&mut physics_config.wind_speed_ms, 0.0..=50.0).text("Wind Speed (m/s)"));
+            ui.add(egui::Slider::new(&mut physics_config.wind_direction_deg, 0.0..=360.0).text("Wind Direction (°)"));
+            ui.add(egui::Slider::new(&mut physics_config.turbulence, 0.0..=1.0).text("Turbulence"));
+            ui.add(egui::Slider::new(&mut physics_config.gust_factor, 0.0..=1.0).text("Gust Factor"));
+            ui.add(egui::Slider::new(&mut physics_config.rain_intensity, 0.0..=1.0).text("Rain Intensity"));
+            ui.add(egui::Slider::new(&mut physics_config.icing_factor, 0.0..=1.0).text("Icing Factor"));
+            ui.add(egui::Slider::new(&mut physics_config.sea_level_density, 0.5..=1.5).text("Sea Level Density"));
+
+            ui.separator();
+            ui.heading("LLM");
+            ui.checkbox(&mut llm_config.enabled, "Enabled");
+            ui.add(egui::Slider::new(&mut llm_config.temperature, 0.0..=2.0).text("Temperature"));
+            ui.horizontal(|ui| {
+                ui.label("Provider:");
+                ui.text_edit_singleline(&mut llm_config.provider);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Model:");
+                ui.text_edit_singleline(&mut llm_config.model);
+            });
+
+            ui.separator();
+            if ui.button("Save to sim.toml").clicked() {
+                let sim_config = crate::core::config::SimConfig {
+                    physics: physics_config.clone(),
+                    llm: llm_config.clone(),
+                    ..Default::default()
+                };
+                if let Err(e) = crate::core::config::save_config(std::path::Path::new("config/sim.toml"), &sim_config) {
+                    eprintln!("Failed to save config: {}", e);
+                }
+            }
+
+            env.wind_speed_ms = physics_config.wind_speed_ms;
+            env.wind_direction_deg = physics_config.wind_direction_deg;
+            env.turbulence = physics_config.turbulence;
+            env.gust_factor = physics_config.gust_factor;
+            env.rain_intensity = physics_config.rain_intensity;
+            env.icing_factor = physics_config.icing_factor;
+            env.sea_level_density = physics_config.sea_level_density;
+        });
+}
+
+fn help_panel(mut contexts: EguiContexts, panel_vis: Res<PanelVisibility>) {
+    if !panel_vis.help {
+        return;
+    }
+    egui::Window::new("Keyboard Shortcuts")
+        .default_pos([340.0, 40.0])
+        .default_size([380.0, 520.0])
+        .show(contexts.ctx_mut(), |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Drone Flight");
+                ui.separator();
+                shortcut_row(ui, "W / S", "Forward / Backward");
+                shortcut_row(ui, "A / D", "Left / Right");
+                shortcut_row(ui, "Space / Shift", "Ascend / Descend");
+                shortcut_row(ui, "Q / E", "Yaw Left / Right");
+                shortcut_row(ui, "1 - 7", "Flight Modes (Manual..Land)");
+                shortcut_row(ui, "X", "Emergency Stop (Land)");
+
+                ui.add_space(12.0);
+                ui.heading("Camera");
+                ui.separator();
+                shortcut_row(ui, "F", "Toggle Follow Drone");
+                shortcut_row(ui, "V", "Toggle Overhead / Street View");
+                shortcut_row(ui, "R", "Reset Camera to Default");
+                shortcut_row(ui, "Mouse Middle + Drag", "Orbit Camera");
+                shortcut_row(ui, "Mouse Right + Drag", "Pan Camera");
+                shortcut_row(ui, "Scroll", "Zoom In / Out");
+                shortcut_row(ui, "Arrow Keys", "Keyboard Pan");
+                shortcut_row(ui, "PgUp / PgDn", "Zoom In / Out");
+                shortcut_row(ui, "+ / -", "Zoom In / Out");
+
+                ui.add_space(12.0);
+                ui.heading("UI Panels");
+                ui.separator();
+                shortcut_row(ui, "F1", "Toggle Help");
+                shortcut_row(ui, "F2", "Toggle Drone Control");
+                shortcut_row(ui, "F3", "Toggle Telemetry");
+                shortcut_row(ui, "F4", "Toggle Camera Feeds");
+                shortcut_row(ui, "F5", "Toggle Map");
+                shortcut_row(ui, "F6", "Toggle LLM Reasoning");
+                shortcut_row(ui, "F7", "Toggle Metrics");
+                shortcut_row(ui, "F9", "Toggle Environment");
+                shortcut_row(ui, "F11", "Camera Feed Fullscreen");
+
+                ui.add_space(12.0);
+                ui.heading("Simulation");
+                ui.separator();
+                shortcut_row(ui, "P", "Pause / Resume");
+                shortcut_row(ui, "[ / ]", "Decrease / Increase Time Scale");
+                shortcut_row(ui, "Tab", "Toggle All UI Panels");
+                shortcut_row(ui, "N", "Navigate to San Francisco");
+                shortcut_row(ui, "Escape", "Unfocus UI Text Fields");
+
+                ui.add_space(12.0);
+                ui.heading("Flight Modes");
+                ui.separator();
+                shortcut_row(ui, "1", "Manual");
+                shortcut_row(ui, "2", "Stabilize");
+                shortcut_row(ui, "3", "AltHold");
+                shortcut_row(ui, "4", "Guided");
+                shortcut_row(ui, "5", "Auto");
+                shortcut_row(ui, "6", "RTL (Return to Launch)");
+                shortcut_row(ui, "7", "Land");
+            });
+        });
+}
+
+fn shortcut_row(ui: &mut egui::Ui, key: &str, action: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(key).monospace().strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(action);
+        });
+    });
 }

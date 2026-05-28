@@ -22,8 +22,6 @@ pub struct DroneCameraMap {
 /// Update camera transforms to follow drones
 pub fn update_camera_views(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     drone_query: Query<(Entity, &DroneIdentity, &Kinematics), Without<DroneCamera>>,
     mut camera_query: Query<&mut Transform, With<DroneCamera>>,
@@ -56,7 +54,7 @@ pub fn update_camera_views(
                 size,
                 bevy::render::render_resource::TextureDimension::D2,
                 &[0, 0, 0, 255],
-                bevy::render::render_resource::TextureFormat::Bgra8UnormSrgb,
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                 bevy::render::render_asset::RenderAssetUsages::default(),
             );
             image.texture_descriptor.usage =
@@ -93,18 +91,7 @@ pub fn update_camera_views(
             camera_map.map.insert(identity.id, cam_entity);
             camera_map.images.insert(identity.id, image_handle.clone());
 
-            // Also spawn a small viewport display in the 3D world
-            commands.spawn(PbrBundle {
-                mesh: meshes.add(Plane3d::new(Vec3::Y, Vec2::new(0.3, 0.2))),
-                material: materials.add(StandardMaterial {
-                    base_color_texture: Some(image_handle.clone()),
-                    unlit: true,
-                    ..default()
-                }),
-                transform: Transform::from_xyz(0.0, 0.15, 0.3)
-                    .with_rotation(Quat::from_rotation_x(-0.3)),
-                ..default()
-            }).set_parent(entity);
+
         }
     }
 }

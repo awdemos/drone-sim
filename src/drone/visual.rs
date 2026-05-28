@@ -9,7 +9,9 @@ use bevy::render::render_resource::{
 use crossbeam_channel::{Sender, Receiver};
 use crate::core::config::EvalConfig;
 use crate::drone::{DroneIdentity, camera::DroneCameraMap};
+use crate::drone::camera::DroneCamera;
 use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
 /// Resource holding the latest camera frames for each drone
 #[derive(Resource, Default)]
@@ -104,7 +106,8 @@ pub fn process_frame_captures(
         if let Some(gpu_image) = gpu_images.get(job.handle.id()) {
             let width = gpu_image.size.x;
             let height = gpu_image.size.y;
-            let bytes_per_row = width * 4;
+            // WGPU requires bytes_per_row to be a multiple of 256 for buffer copies.
+            let bytes_per_row = ((width * 4 + 255) / 256) * 256;
             let buffer_size = (bytes_per_row * height) as u64;
 
             let buffer = render_device.create_buffer(&BufferDescriptor {
@@ -174,5 +177,61 @@ pub fn cleanup_visual_buffer(
         frame_buffer.frames.remove(&event.drone_id);
         frame_buffer.last_capture.remove(&event.drone_id);
         debug!("Cleaned up VisualFrameBuffer for drone {:?}", event.drone_id);
+    }
+}
+
+/// Event requesting a screenshot of all drone cameras
+#[derive(Event)]
+pub struct ScreenshotEvent;
+
+/// Keyboard system: trigger screenshot on F12
+pub fn screenshot_input(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut events: EventWriter<ScreenshotEvent>,
+) {
+    if keyboard.just_pressed(KeyCode::F12) {
+        events.send(ScreenshotEvent);
+    }
+}
+
+/// Save buffered frames to PNG when screenshot is requested
+pub fn save_screenshots(
+    mut events: EventReader<ScreenshotEvent>,
+    frame_buffer: Res<VisualFrameBuffer>,
+    camera_query: Query<(&DroneCamera, &DroneIdentity)>,
+) {
+    let _ = std::fs::create_dir_all("data/screenshots");
+
+    for _event in events.read() {
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+
+        for (drone_camera, identity) in camera_query.iter() {
+            if let Some(frame) = frame_buffer.frames.get(&identity.id) {
+                let data = frame.lock().unwrap();
+                let (width, height) = drone_camera.resolution;
+                let bytes_per_row = ((width * 4 + 255) / 256) * 256;
+
+                let mut img_data = Vec::with_capacity((width * height * 4) as usize);
+                for row in 0..height {
+                    let row_start = (row * bytes_per_row) as usize;
+                    let row_end = row_start + (width * 4) as usize;
+                    if row_end <= data.len() {
+                        img_data.extend_from_slice(&data[row_start..row_end]);
+                    }
+                }
+
+                if let Some(img) = image::RgbaImage::from_raw(width, height, img_data) {
+                    let path = PathBuf::from(format!(
+                        "data/screenshots/{}_{}.png",
+                        timestamp, identity.name.replace(' ', "_")
+                    ));
+                    if let Err(e) = img.save(&path) {
+                        eprintln!("Failed to save screenshot: {}", e);
+                    } else {
+                        info!("Screenshot saved: {:?}", path);
+                    }
+                }
+            }
+        }
     }
 }

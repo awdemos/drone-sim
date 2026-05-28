@@ -109,12 +109,18 @@ pub struct PhysicsConfig {
     pub wind_direction_deg: f32,
     /// Turbulence intensity (0..1, fraction of wind speed)
     pub turbulence: f32,
+    /// Wind gust factor (0..1, intensity of sudden gusts)
+    pub gust_factor: f32,
     /// Sea-level air density (kg/m³) — normalized reference, 1.0 = standard
     pub sea_level_density: f32,
     /// Atmospheric scale height in meters (density e-fold)
     pub density_scale_height_m: f32,
     /// Altitude offset for density calc (e.g., if sea-level is not y=0)
     pub sea_level_offset_m: f32,
+    /// Rain intensity (0..1) — increases drag and reduces visibility
+    pub rain_intensity: f32,
+    /// Icing factor (0..1) — reduces lift and increases mass
+    pub icing_factor: f32,
 }
 
 impl Default for PhysicsConfig {
@@ -123,9 +129,12 @@ impl Default for PhysicsConfig {
             wind_speed_ms: 0.0,
             wind_direction_deg: 0.0,
             turbulence: 0.1,
+            gust_factor: 0.0,
             sea_level_density: 1.0,
             density_scale_height_m: 8400.0,
             sea_level_offset_m: 0.0,
+            rain_intensity: 0.0,
+            icing_factor: 0.0,
         }
     }
 }
@@ -194,10 +203,12 @@ impl Default for LlmConfig {
             system_prompt: concat!(
                 "You are the AI pilot of a quadcopter drone. ",
                 "You receive visual input from the drone camera and telemetry data. ",
+                "You can navigate waypoints, avoid obstacles, and respect airspace restrictions. ",
                 "Respond with a JSON object containing: ",
-                "'action' (one of: hover, move_forward, move_back, move_left, move_right, ascend, descend, rotate_cw, rotate_ccw, land), ",
+                "'action' (one of: hover, move_forward, move_back, move_left, move_right, ascend, descend, rotate_cw, rotate_ccw, land, navigate_to, follow_mission), ",
                 "'reasoning' (brief explanation), ",
-                "'duration_secs' (how long to execute the action)."
+                "'duration_secs' (how long to execute the action), ",
+                "For navigate_to: include 'target_lat', 'target_lon', 'target_alt_agl'."
             )
             .into(),
         }
@@ -246,6 +257,12 @@ pub fn load_config(path: Option<&std::path::Path>) -> anyhow::Result<SimConfig> 
 pub fn save_default_config(path: &std::path::Path) -> anyhow::Result<()> {
     let config = SimConfig::default();
     let content = toml::to_string_pretty(&config)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+pub fn save_config(path: &std::path::Path, config: &SimConfig) -> anyhow::Result<()> {
+    let content = toml::to_string_pretty(config)?;
     std::fs::write(path, content)?;
     Ok(())
 }

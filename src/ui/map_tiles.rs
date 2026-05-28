@@ -3,6 +3,8 @@ use bevy_egui::{egui, EguiContexts};
 use std::collections::HashMap;
 
 use crate::core::mercator::*;
+use crate::core::types::{AirspaceGeometry, AirspaceRestrictionType, UserGeofence};
+use crate::faa::loader::AirspaceData;
 use crate::ui::{ReloadWorldEvent, UiPreferences};
 use crate::drone::{FleetRegistry, SpawnDroneEvent};
 
@@ -79,6 +81,12 @@ pub struct MapTileState {
     pub show_grid: bool,
     pub show_labels: bool,
     pub show_trails: bool,
+    pub show_waypoints: bool,
+    pub show_airspace: bool,
+    pub show_geofences: bool,
+    pub drawing_geofence: bool,
+    pub geofence_vertices: Vec<(f64, f64)>,
+    pub user_geofences: Vec<UserGeofence>,
     pub dragging_drone: Option<crate::core::types::DroneId>,
     pub pending_drag_move: Option<(crate::core::types::DroneId, Vec3)>,
 }
@@ -98,6 +106,12 @@ impl Default for MapTileState {
             show_grid: true,
             show_labels: true,
             show_trails: true,
+            show_waypoints: true,
+            show_airspace: false,
+            show_geofences: true,
+            drawing_geofence: false,
+            geofence_vertices: Vec::new(),
+            user_geofences: Vec::new(),
             dragging_drone: None,
             pending_drag_move: None,
         }
@@ -264,7 +278,7 @@ fn draw_lat_lon_grid(
     let mut lon = (left_lon / lon_step).floor() * lon_step;
     while lon <= right_lon {
         let (px, _) = lat_lon_to_pixel(top_lat, lon, zoom);
-        let screen_x = px - tl_px + rect.min.x as f64;
+        let screen_x = (px - tl_px + rect.min.x as f64).round();
 
         if screen_x >= rect.min.x as f64 && screen_x <= rect.max.x as f64 {
             let top = egui::pos2(screen_x as f32, rect.min.y);
@@ -286,7 +300,7 @@ fn draw_lat_lon_grid(
     let mut lat = (bottom_lat / lat_step).floor() * lat_step;
     while lat <= top_lat {
         let (_, py) = lat_lon_to_pixel(lat, left_lon, zoom);
-        let screen_y = py - tl_py + rect.min.y as f64;
+        let screen_y = (py - tl_py + rect.min.y as f64).round();
 
         if screen_y >= rect.min.y as f64 && screen_y <= rect.max.y as f64 {
             let left = egui::pos2(rect.min.x, screen_y as f32);
@@ -348,11 +362,19 @@ pub fn map_panel(
     mut navigate_events: EventWriter<ReloadWorldEvent>,
     ui_prefs: Res<UiPreferences>,
     mut spawn_events: EventWriter<SpawnDroneEvent>,
+    panel_vis: Res<crate::ui::PanelVisibility>,
+    airspace: Res<AirspaceData>,
 ) {
+    if !panel_vis.map {
+        return;
+    }
     let Some(ctx) = contexts.try_ctx_mut() else {
         return;
     };
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::Window::new("Map")
+        .default_pos([20.0, 60.0])
+        .default_size([900.0, 700.0])
+        .show(ctx, |ui| {
             // ── Map style controls ──
             ui.horizontal(|ui| {
                 ui.label("Style:");
@@ -377,6 +399,43 @@ pub fn map_panel(
                 ui.checkbox(&mut tile_state.show_grid, "Grid lines");
                 ui.checkbox(&mut tile_state.show_labels, "Labels");
                 ui.checkbox(&mut tile_state.show_trails, "Trails");
+                ui.checkbox(&mut tile_state.show_waypoints, "Waypoints");
+                ui.checkbox(&mut tile_state.show_airspace, "Airspace");
+                ui.checkbox(&mut tile_state.show_geofences, "Geofences");
+            });
+
+            ui.horizontal(|ui| {
+                let drawing = tile_state.drawing_geofence;
+                let btn_text = if drawing { "Stop Drawing" } else { "Draw Geofence" };
+                if ui.button(btn_text).clicked() {
+                    tile_state.drawing_geofence = !drawing;
+                    if !tile_state.drawing_geofence {
+                        if tile_state.geofence_vertices.len() >= 3 {
+                            let name = format!("Geofence {}", tile_state.user_geofences.len() + 1);
+                            let vertices = tile_state.geofence_vertices.clone();
+                            tile_state.user_geofences.push(UserGeofence {
+                                name,
+                                vertices,
+                                max_altitude_ft: None,
+                            });
+                        }
+                        tile_state.geofence_vertices.clear();
+                    }
+                }
+                if drawing {
+                    ui.label(format!("{} vertices", tile_state.geofence_vertices.len()));
+                }
+                if !tile_state.user_geofences.is_empty() && ui.button("Clear All").clicked() {
+                    tile_state.user_geofences.clear();
+                }
+                if ui.button("Save").clicked() {
+                    let _ = save_geofences(&tile_state.user_geofences);
+                }
+                if ui.button("Load").clicked() {
+                    if let Some(geofences) = load_geofences() {
+                        tile_state.user_geofences = geofences;
+                    }
+                }
             });
 
             ui.separator();
@@ -452,8 +511,9 @@ pub fn map_panel(
             }
 
             // ── Compute visible tiles ──
-            let tl_px = tile_state.center_pixel_x - rect.width() as f64 / 2.0;
-            let tl_py = tile_state.center_pixel_y - rect.height() as f64 / 2.0;
+            // Round to whole pixels to prevent sub-pixel jitter
+            let tl_px = (tile_state.center_pixel_x - rect.width() as f64 / 2.0).round();
+            let tl_py = (tile_state.center_pixel_y - rect.height() as f64 / 2.0).round();
             let min_tx = (tl_px / 256.0).floor() as i32;
             let max_tx = ((tl_px + rect.width() as f64) / 256.0).ceil() as i32;
             let min_ty = (tl_py / 256.0).floor() as i32;
@@ -508,8 +568,8 @@ pub fn map_panel(
                     };
                     let tile_px = tx as f64 * 256.0;
                     let tile_py = ty as f64 * 256.0;
-                    let screen_x = tile_px - tl_px + rect.min.x as f64;
-                    let screen_y = tile_py - tl_py + rect.min.y as f64;
+                    let screen_x = (tile_px - tl_px + rect.min.x as f64).round();
+                    let screen_y = (tile_py - tl_py + rect.min.y as f64).round();
                     let tile_rect = egui::Rect::from_min_size(
                         egui::pos2(screen_x as f32, screen_y as f32),
                         egui::Vec2::new(256.0, 256.0),
@@ -588,14 +648,23 @@ pub fn map_panel(
                 draw_lat_lon_grid(&painter, rect, &*tile_state, tile_state.zoom);
             }
 
+            // ── Draw airspace restrictions ──
+            if tile_state.show_airspace {
+                draw_airspace_zones(&painter, rect, &*airspace, tl_px, tl_py, tile_state.zoom);
+            }
+
+            if tile_state.show_geofences {
+                draw_user_geofences(&painter, rect, &*tile_state, tl_px, tl_py, tile_state.zoom);
+            }
+
             // ── Draw drones on top ──
             let mut hover_drone: Option<crate::core::types::DroneId> = None;
             if let Some(mouse) = response.hover_pos() {
             for (_entity, identity, kinematics, _mission_state, _flight_control) in drone_query.iter() {
                     let gps = geo.world_to_gps(kinematics.position);
                     let (px, py) = lat_lon_to_pixel(gps.latitude, gps.longitude, tile_state.zoom);
-                    let sx = px - tl_px + rect.min.x as f64;
-                    let sy = py - tl_py + rect.min.y as f64;
+                    let sx = (px - tl_px + rect.min.x as f64).round();
+                    let sy = (py - tl_py + rect.min.y as f64).round();
                     let pos = egui::pos2(sx as f32, sy as f32);
                     if (mouse - pos).length_sq() < 144.0 {
                         hover_drone = Some(identity.id);
@@ -614,11 +683,11 @@ pub fn map_panel(
             let mut clicked_drone: Option<crate::core::types::DroneId> = None;
             let click_pos = response.interact_pointer_pos();
 
-            for (entity, identity, kinematics, _mission_state, _flight_control) in drone_query.iter() {
+            for (entity, identity, kinematics, mission_state, _flight_control) in drone_query.iter() {
                 let gps = geo.world_to_gps(kinematics.position);
                 let (px, py) = lat_lon_to_pixel(gps.latitude, gps.longitude, tile_state.zoom);
-                let screen_x = px - tl_px + rect.min.x as f64;
-                let screen_y = py - tl_py + rect.min.y as f64;
+                let screen_x = (px - tl_px + rect.min.x as f64).round();
+                let screen_y = (py - tl_py + rect.min.y as f64).round();
 
                 if screen_x < rect.min.x as f64
                     || screen_x > rect.max.x as f64
@@ -673,8 +742,8 @@ pub fn map_panel(
                                 .filter_map(|p| {
                                     let tg = geo.world_to_gps(*p);
                                     let (tpx, tpy) = lat_lon_to_pixel(tg.latitude, tg.longitude, tile_state.zoom);
-                                    let sx = tpx - tl_px + rect.min.x as f64;
-                                    let sy = tpy - tl_py + rect.min.y as f64;
+                                    let sx = (tpx - tl_px + rect.min.x as f64).round();
+                                    let sy = (tpy - tl_py + rect.min.y as f64).round();
                                     if sx >= rect.min.x as f64 - 10.0 && sx <= rect.max.x as f64 + 10.0
                                         && sy >= rect.min.y as f64 - 10.0 && sy <= rect.max.y as f64 + 10.0
                                     {
@@ -697,10 +766,65 @@ pub fn map_panel(
                         }
                     }
                 }
+
+                if tile_state.show_waypoints {
+                    if let Some(ref mission) = mission_state.mission {
+                        if !mission.waypoints.is_empty() {
+                            let wp_color = if is_selected {
+                                egui::Color32::from_rgba_unmultiplied(0, 255, 150, 220)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(0, 200, 120, 140)
+                            };
+                            let wp_active = egui::Color32::from_rgba_unmultiplied(255, 255, 0, 240);
+
+                            let mut wp_screen_pts = Vec::new();
+                            for (i, wp) in mission.waypoints.iter().enumerate() {
+                                let (wpx, wpy) = lat_lon_to_pixel(wp.latitude, wp.longitude, tile_state.zoom);
+                                let sx = (wpx - tl_px + rect.min.x as f64).round();
+                                let sy = (wpy - tl_py + rect.min.y as f64).round();
+                                if sx >= rect.min.x as f64 && sx <= rect.max.x as f64
+                                    && sy >= rect.min.y as f64 && sy <= rect.max.y as f64
+                                {
+                                    let s = egui::pos2(sx as f32, sy as f32);
+                                    wp_screen_pts.push((s, i));
+                                }
+                            }
+
+                            if wp_screen_pts.len() >= 2 {
+                                for pair in wp_screen_pts.windows(2) {
+                                    painter.line_segment([pair[0].0, pair[1].0], egui::Stroke::new(2.0, wp_color));
+                                }
+                            }
+
+                            for (s, i) in wp_screen_pts {
+                                let is_current = i == mission_state.current_waypoint;
+                                let color = if is_current { wp_active } else { wp_color };
+                                let radius = if is_current { 8.0 } else { 5.0 };
+                                painter.circle_filled(s, radius, color);
+                                painter.circle_stroke(s, radius, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                                let label = format!("{}", i + 1);
+                                painter.text(
+                                    s + egui::Vec2::new(0.0, -radius - 4.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &label,
+                                    egui::FontId::proportional(if is_current { 11.0 } else { 9.0 }),
+                                    egui::Color32::WHITE,
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             if response.clicked() {
-                if let Some(drone_id) = clicked_drone {
+                if tile_state.drawing_geofence {
+                    if let Some(mouse) = click_pos {
+                        let mouse_px = tl_px + (mouse.x - rect.min.x) as f64;
+                        let mouse_py = tl_py + (mouse.y - rect.min.y) as f64;
+                        let (lat, lon) = pixel_to_lat_lon(mouse_px, mouse_py, tile_state.zoom);
+                        tile_state.geofence_vertices.push((lat, lon));
+                    }
+                } else if let Some(drone_id) = clicked_drone {
                     fleet_registry.select_single(drone_id);
                 } else if let Some(mouse) = click_pos {
                     let selected_ids: Vec<crate::core::types::DroneId> = fleet_registry.selected().iter().copied().collect();
@@ -818,6 +942,225 @@ pub fn apply_map_drag(
                 kinematics.velocity = bevy::prelude::Vec3::ZERO;
                 break;
             }
+        }
+    }
+}
+
+fn draw_airspace_zones(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    airspace: &AirspaceData,
+    tl_px: f64,
+    tl_py: f64,
+    zoom: u32,
+) {
+    let center_lat = if let Some(mouse) = painter.ctx().input(|i| i.pointer.hover_pos()) {
+        let mouse_px = tl_px + (mouse.x - rect.min.x) as f64;
+        let mouse_py = tl_py + (mouse.y - rect.min.y) as f64;
+        let (lat, _) = pixel_to_lat_lon(mouse_px, mouse_py, zoom);
+        lat
+    } else {
+        let (_, lat) = pixel_to_lat_lon(tl_px + rect.width() as f64 / 2.0, tl_py + rect.height() as f64 / 2.0, zoom);
+        lat
+    };
+
+    let lat_rad = center_lat.to_radians();
+    let meters_per_px = 156543.03 * lat_rad.cos() / (1u32 << zoom) as f64;
+
+    for zone in airspace.all_zones() {
+        let (fill_color, stroke_color) = match zone.zone_type {
+            AirspaceRestrictionType::NoFly => (
+                egui::Color32::from_rgba_unmultiplied(255, 0, 0, 30),
+                egui::Color32::from_rgba_unmultiplied(255, 0, 0, 150),
+            ),
+            AirspaceRestrictionType::HeightRestricted => (
+                egui::Color32::from_rgba_unmultiplied(255, 200, 0, 25),
+                egui::Color32::from_rgba_unmultiplied(255, 200, 0, 120),
+            ),
+            AirspaceRestrictionType::Warning => (
+                egui::Color32::from_rgba_unmultiplied(255, 140, 0, 25),
+                egui::Color32::from_rgba_unmultiplied(255, 140, 0, 120),
+            ),
+        };
+
+        match &zone.geometry {
+            AirspaceGeometry::Circle { center_lat, center_lon, radius_meters } => {
+                let (px, py) = lat_lon_to_pixel(*center_lat, *center_lon, zoom);
+                let screen_x = (px - tl_px + rect.min.x as f64) as f32;
+                let screen_y = (py - tl_py + rect.min.y as f64) as f32;
+
+                if screen_x < rect.min.x - 200.0
+                    || screen_x > rect.max.x + 200.0
+                    || screen_y < rect.min.y - 200.0
+                    || screen_y > rect.max.y + 200.0
+                {
+                    continue;
+                }
+
+                let radius_px = (*radius_meters / meters_per_px) as f32;
+                let center = egui::pos2(screen_x, screen_y);
+
+                painter.circle_filled(center, radius_px, fill_color);
+                painter.circle_stroke(center, radius_px, egui::Stroke::new(2.0, stroke_color));
+
+                if let Some(max_ft) = zone.max_altitude_ft {
+                    painter.text(
+                        center + egui::Vec2::new(0.0, -radius_px - 6.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        &format!("{:.0}ft", max_ft),
+                        egui::FontId::proportional(10.0),
+                        stroke_color,
+                    );
+                }
+
+                painter.text(
+                    center + egui::Vec2::new(0.0, radius_px + 4.0),
+                    egui::Align2::CENTER_TOP,
+                    &zone.name,
+                    egui::FontId::proportional(9.0),
+                    stroke_color,
+                );
+            }
+            AirspaceGeometry::Polygon { vertices } => {
+                let screen_points: Vec<egui::Pos2> = vertices
+                    .iter()
+                    .filter_map(|(lat, lon)| {
+                        let (px, py) = lat_lon_to_pixel(*lat, *lon, zoom);
+                        let sx = (px - tl_px + rect.min.x as f64) as f32;
+                        let sy = (py - tl_py + rect.min.y as f64) as f32;
+                        if sx >= rect.min.x - 50.0
+                            && sx <= rect.max.x + 50.0
+                            && sy >= rect.min.y - 50.0
+                            && sy <= rect.max.y + 50.0
+                        {
+                            Some(egui::pos2(sx, sy))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if screen_points.len() >= 3 {
+                    painter.add(egui::Shape::convex_polygon(
+                        screen_points.clone(),
+                        fill_color,
+                        egui::Stroke::new(1.5, stroke_color),
+                    ));
+
+                    if let Some(first) = screen_points.first() {
+                        painter.text(
+                            *first + egui::Vec2::new(0.0, -12.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            &zone.name,
+                            egui::FontId::proportional(9.0),
+                            stroke_color,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn save_geofences(geofences: &[UserGeofence]) -> Result<(), String> {
+    let path = std::path::Path::new("data/geofences.json");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(geofences).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn load_geofences() -> Option<Vec<UserGeofence>> {
+    let path = std::path::Path::new("data/geofences.json");
+    if !path.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn draw_user_geofences(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    tile_state: &MapTileState,
+    tl_px: f64,
+    tl_py: f64,
+    zoom: u32,
+) {
+    let fill_color = egui::Color32::from_rgba_unmultiplied(255, 140, 0, 40);
+    let stroke_color = egui::Color32::from_rgba_unmultiplied(255, 140, 0, 180);
+    let vertex_color = egui::Color32::from_rgba_unmultiplied(255, 200, 50, 220);
+
+        for geofence in &tile_state.user_geofences {
+            let screen_points: Vec<egui::Pos2> = geofence.vertices
+                .iter()
+                .filter_map(|(lat, lon)| {
+                let (px, py) = lat_lon_to_pixel(*lat, *lon, zoom);
+                let sx = (px - tl_px + rect.min.x as f64) as f32;
+                let sy = (py - tl_py + rect.min.y as f64) as f32;
+                if sx >= rect.min.x - 50.0 && sx <= rect.max.x + 50.0
+                    && sy >= rect.min.y - 50.0 && sy <= rect.max.y + 50.0
+                {
+                    Some(egui::pos2(sx, sy))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if screen_points.len() >= 3 {
+            painter.add(egui::Shape::convex_polygon(
+                screen_points.clone(),
+                fill_color,
+                egui::Stroke::new(2.0, stroke_color),
+            ));
+            for pt in &screen_points {
+                painter.circle_filled(*pt, 4.0, vertex_color);
+            }
+            if let Some(first) = screen_points.first() {
+                painter.text(
+                    *first + egui::Vec2::new(0.0, -14.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    &geofence.name,
+                    egui::FontId::proportional(10.0),
+                    stroke_color,
+                );
+            }
+        }
+    }
+
+    if tile_state.drawing_geofence && !tile_state.geofence_vertices.is_empty() {
+        let screen_points: Vec<egui::Pos2> = tile_state.geofence_vertices
+            .iter()
+            .filter_map(|(lat, lon)| {
+                let (px, py) = lat_lon_to_pixel(*lat, *lon, zoom);
+                let sx = (px - tl_px + rect.min.x as f64) as f32;
+                let sy = (py - tl_py + rect.min.y as f64) as f32;
+                if sx >= rect.min.x - 50.0 && sx <= rect.max.x + 50.0
+                    && sy >= rect.min.y - 50.0 && sy <= rect.max.y + 50.0
+                {
+                    Some(egui::pos2(sx, sy))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for pt in &screen_points {
+            painter.circle_filled(*pt, 4.0, vertex_color);
+        }
+        if screen_points.len() >= 2 {
+            for pair in screen_points.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(2.0, stroke_color));
+            }
+        }
+        if screen_points.len() >= 3 {
+            painter.add(egui::Shape::convex_polygon(
+                screen_points.clone(),
+                fill_color,
+                egui::Stroke::new(2.0, stroke_color),
+            ));
         }
     }
 }

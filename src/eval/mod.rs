@@ -27,7 +27,7 @@ impl Plugin for EvalPlugin {
 }
 
 pub fn clear_eval_data(
-    mut events: EventReader<crate::ClearDroneDataEvent>,
+    mut events: EventReader<crate::events::ClearDroneDataEvent>,
     trace: ResMut<trace::TraceCollector>,
     mut metrics: ResMut<metrics::MetricsCollector>,
 ) {

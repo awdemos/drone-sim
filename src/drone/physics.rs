@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+use std::collections::HashMap;
+use uuid::Uuid;
 use crate::core::gps::GeoReference;
 use crate::core::types::{FlightMode, SimEvent, SimTimestamp};
 use crate::drone::{DamageLevel, DroneIdentity, Kinematics, FlightControl, Battery, Health, GpsPosition, EnvironmentSettings};
@@ -6,6 +8,8 @@ use crate::drone::types::{DroneTypeRegistry, DroneTypeSpec};
 use crate::eval::trace::TraceCollector;
 use crate::world::terrain::TerrainData;
 use crate::world::SpatialGrid;
+use crate::faa::loader::AirspaceData;
+use crate::core::types::{AirspaceGeometry, AirspaceRestrictionType};
 
 const GRAVITY: f32 = 9.81;
 
@@ -53,7 +57,7 @@ pub fn compute_thrust_acceleration(kinematics: &Kinematics, thrust: f32, spec: &
 /// Clamp pitch and roll to `max_tilt` for stabilised flight modes.
 pub fn clamp_tilt(kinematics: &mut Kinematics, max_tilt: f32, mode: FlightMode) {
     match mode {
-        FlightMode::Stabilize | FlightMode::AltHold | FlightMode::Loiter => {
+        FlightMode::Stabilize | FlightMode::AltHold | FlightMode::Loiter | FlightMode::Land => {
             let (yaw, pitch, roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
             let clamped_pitch = pitch.clamp(-max_tilt, max_tilt);
             let clamped_roll = roll.clamp(-max_tilt, max_tilt);
@@ -105,6 +109,9 @@ pub fn update_physics(
         let spec = registry.specs.get(&identity.drone_type).unwrap();
 
         let air_density = env.air_density_ratio(kinematics.position.y);
+        let rain_drag_mult = 1.0 + env.rain_intensity * 0.5;
+        let icing_lift_mult = 1.0 - env.icing_factor * 0.4;
+        let icing_mass_mult = 1.0 + env.icing_factor * 0.2;
 
         if !health.is_operational {
             kinematics.velocity.y -= GRAVITY * dt;
@@ -130,8 +137,7 @@ pub fn update_physics(
             continue;
         }
 
-        // Thrust efficiency scales with air density (less thrust at altitude)
-        let thrust_vec = kinematics.orientation * Vec3::Y * flight_control.thrust * spec.engine.max_thrust_n * air_density;
+        let thrust_vec = kinematics.orientation * Vec3::Y * flight_control.thrust * spec.engine.max_thrust_n * air_density * icing_lift_mult;
         let torque = flight_control.angular_thrust * spec.engine.max_torque_nm;
 
         kinematics.angular_velocity += torque * dt;
@@ -152,11 +158,11 @@ pub fn update_physics(
         let max_tilt_angle = spec.flight_controller.max_tilt_angle_deg.to_radians();
         clamp_tilt(&mut kinematics, max_tilt_angle, flight_control.mode);
 
-        // Drag uses relative wind (drone moving through air mass, not ground)
         let relative_wind = kinematics.velocity - wind;
-        let total_drag = compute_drag(relative_wind, spec) * air_density;
+        let total_drag = compute_drag(relative_wind, spec) * air_density * rain_drag_mult;
 
-        let acceleration = (thrust_vec + total_drag) / spec.airframe.mass_kg.max(0.1);
+        let effective_mass = spec.airframe.mass_kg * icing_mass_mult;
+        let acceleration = (thrust_vec + total_drag) / effective_mass.max(0.1);
         kinematics.velocity += acceleration * dt;
 
         let velocity = kinematics.velocity;
@@ -350,6 +356,211 @@ pub fn update_damage_effects(
             *visibility = Visibility::Hidden;
         }
     }
+}
+
+pub fn drone_collision_avoidance(
+    mut query: Query<(&DroneIdentity, &mut Kinematics, &Health)>,
+    registry: Res<DroneTypeRegistry>,
+) {
+    let mut positions = Vec::new();
+    for (identity, kinematics, health) in query.iter() {
+        if !health.is_operational {
+            continue;
+        }
+        let spec = registry.specs.get(&identity.drone_type).unwrap();
+        positions.push((identity.id, kinematics.position, spec.airframe.collision_radius));
+    }
+
+    let mut adjustments: HashMap<Uuid, Vec3> = HashMap::new();
+
+    for i in 0..positions.len() {
+        for j in (i + 1)..positions.len() {
+            let (id_a, pos_a, radius_a) = positions[i];
+            let (id_b, pos_b, radius_b) = positions[j];
+            let delta = pos_a - pos_b;
+            let dist = delta.length();
+            let min_dist = (radius_a + radius_b) * 3.0;
+
+            if dist < min_dist && dist > 0.001 {
+                let overlap = min_dist - dist;
+                let push = delta.normalize() * overlap * 2.0;
+                *adjustments.entry(id_a.0).or_insert(Vec3::ZERO) += push;
+                *adjustments.entry(id_b.0).or_insert(Vec3::ZERO) -= push;
+            }
+        }
+    }
+
+    for (identity, mut kinematics, health) in query.iter_mut() {
+        if !health.is_operational {
+            continue;
+        }
+        if let Some(&push) = adjustments.get(&identity.id.0) {
+            kinematics.velocity += push;
+        }
+    }
+}
+
+// ===================================================================
+// Safety systems
+// ===================================================================
+
+/// Tracks active airspace violations for a drone.
+#[derive(Component, Clone, Debug, Default)]
+pub struct AirspaceViolation {
+    pub in_no_fly: bool,
+    pub in_height_restricted: bool,
+    pub zone_name: String,
+    pub max_altitude_ft: Option<f64>,
+}
+
+/// Auto-switch to RTL when battery is critically low.
+/// - < 25%: switch to RTL
+/// - < 10%: switch to Land (emergency)
+pub fn check_battery_rtl(
+    mut query: Query<(&mut FlightControl, &Battery), Changed<Battery>>,
+) {
+    for (mut flight_control, battery) in query.iter_mut() {
+        if battery.percent <= 10.0 && flight_control.mode != FlightMode::Land {
+            flight_control.mode = FlightMode::Land;
+        } else if battery.percent <= 25.0 && !matches!(flight_control.mode, FlightMode::Rtl | FlightMode::Land) {
+            flight_control.mode = FlightMode::Rtl;
+        }
+    }
+}
+
+/// Physically enforce height restrictions by clamping drone altitude.
+/// Runs after physics integration but before collision checks.
+pub fn enforce_height_restrictions(
+    airspace: Res<AirspaceData>,
+    geo: Res<GeoReference>,
+    mut query: Query<(&mut Kinematics, &GpsPosition)>,
+) {
+    for (mut kinematics, gps) in query.iter_mut() {
+        for zone in airspace.all_zones() {
+            let in_zone = match &zone.geometry {
+                AirspaceGeometry::Circle { center_lat, center_lon, radius_meters } => {
+                    let dlat = gps.coord.latitude - center_lat;
+                    let dlon = gps.coord.longitude - center_lon;
+                    let dist_m = ((dlat * 111320.0).powi(2) + (dlon * 111320.0 * center_lat.to_radians().cos()).powi(2)).sqrt();
+                    dist_m <= *radius_meters
+                }
+                AirspaceGeometry::Polygon { vertices } => {
+                    point_in_polygon(gps.coord.latitude, gps.coord.longitude, vertices)
+                }
+            };
+
+            if in_zone {
+                if let Some(max_alt_ft) = zone.max_altitude_ft {
+                    let max_alt_m = max_alt_ft * 0.3048;
+                    let current_alt_m = gps.coord.altitude_msl;
+                    if current_alt_m > max_alt_m {
+                        kinematics.position.y = (max_alt_m - geo.origin_alt) as f32;
+                        if kinematics.velocity.y > 0.0 {
+                            kinematics.velocity.y = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check if drones are in restricted airspace and update violation state.
+pub fn check_airspace_violations(
+    airspace: Res<AirspaceData>,
+    mut commands: Commands,
+    mut drone_query: Query<(Entity, &GpsPosition), Without<AirspaceViolation>>,
+    mut violation_query: Query<(Entity, &GpsPosition, &mut AirspaceViolation)>,
+) {
+    for (entity, gps) in drone_query.iter_mut() {
+        let mut violation = AirspaceViolation::default();
+        for zone in airspace.all_zones() {
+            let in_zone = match &zone.geometry {
+                AirspaceGeometry::Circle { center_lat, center_lon, radius_meters } => {
+                    let dlat = gps.coord.latitude - center_lat;
+                    let dlon = gps.coord.longitude - center_lon;
+                    let dist_m = ((dlat * 111320.0).powi(2) + (dlon * 111320.0 * center_lat.to_radians().cos()).powi(2)).sqrt();
+                    dist_m <= *radius_meters
+                }
+                AirspaceGeometry::Polygon { vertices } => {
+                    point_in_polygon(gps.coord.latitude, gps.coord.longitude, vertices)
+                }
+            };
+            if in_zone {
+                match zone.zone_type {
+                    AirspaceRestrictionType::NoFly => {
+                        violation.in_no_fly = true;
+                        violation.zone_name = zone.name.clone();
+                    }
+                    AirspaceRestrictionType::HeightRestricted => {
+                        let alt_ft = gps.coord.altitude_msl * 3.28084;
+                        if zone.max_altitude_ft.map(|max| alt_ft > max).unwrap_or(false) {
+                            violation.in_height_restricted = true;
+                            violation.max_altitude_ft = zone.max_altitude_ft;
+                            violation.zone_name = zone.name.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        commands.entity(entity).insert(violation);
+    }
+
+    for (_entity, gps, mut violation) in violation_query.iter_mut() {
+        violation.in_no_fly = false;
+        violation.in_height_restricted = false;
+        violation.zone_name.clear();
+        violation.max_altitude_ft = None;
+
+        for zone in airspace.all_zones() {
+            let in_zone = match &zone.geometry {
+                AirspaceGeometry::Circle { center_lat, center_lon, radius_meters } => {
+                    let dlat = gps.coord.latitude - center_lat;
+                    let dlon = gps.coord.longitude - center_lon;
+                    let dist_m = ((dlat * 111320.0).powi(2) + (dlon * 111320.0 * center_lat.to_radians().cos()).powi(2)).sqrt();
+                    dist_m <= *radius_meters
+                }
+                AirspaceGeometry::Polygon { vertices } => {
+                    point_in_polygon(gps.coord.latitude, gps.coord.longitude, vertices)
+                }
+            };
+            if in_zone {
+                match zone.zone_type {
+                    AirspaceRestrictionType::NoFly => {
+                        violation.in_no_fly = true;
+                        violation.zone_name = zone.name.clone();
+                    }
+                    AirspaceRestrictionType::HeightRestricted => {
+                        let alt_ft = gps.coord.altitude_msl * 3.28084;
+                        if zone.max_altitude_ft.map(|max| alt_ft > max).unwrap_or(false) {
+                            violation.in_height_restricted = true;
+                            violation.max_altitude_ft = zone.max_altitude_ft;
+                            violation.zone_name = zone.name.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Point-in-polygon test using ray casting.
+fn point_in_polygon(lat: f64, lon: f64, vertices: &[(f64, f64)]) -> bool {
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (vi_lat, vi_lon) = vertices[i];
+        let (vj_lat, vj_lon) = vertices[j];
+        if ((vi_lon > lon) != (vj_lon > lon))
+            && (lat < (vj_lat - vi_lat) * (lon - vi_lon) / (vj_lon - vi_lon) + vi_lat)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 // ===================================================================

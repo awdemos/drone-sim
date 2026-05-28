@@ -88,13 +88,6 @@ impl Default for FlightMode {
     }
 }
 
-/// Type of drone / airframe
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Resource)]
-pub enum CameraMode {
-    Overhead,
-    StreetView,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DroneType {
     TinyWhoop,
@@ -186,4 +179,38 @@ pub enum SimEvent {
         timestamp: SimTimestamp,
         position: Vec3,
     },
+}
+
+/// FAA Airspace restriction zone type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AirspaceRestrictionType {
+    NoFly,
+    HeightRestricted,
+    Warning,
+}
+
+/// Geometry for an airspace restriction zone
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AirspaceGeometry {
+    Circle { center_lat: f64, center_lon: f64, radius_meters: f64 },
+    Polygon { vertices: Vec<(f64, f64)> },
+}
+
+/// An airspace restriction zone (airport no-fly, height limit, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirspaceZone {
+    pub name: String,
+    pub zone_type: AirspaceRestrictionType,
+    pub geometry: AirspaceGeometry,
+    pub min_altitude_ft: Option<f64>,
+    pub max_altitude_ft: Option<f64>,
+    pub source: String,
+}
+
+/// A user-drawn geofence polygon on the map
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserGeofence {
+    pub name: String,
+    pub vertices: Vec<(f64, f64)>,
+    pub max_altitude_ft: Option<f64>,
 }

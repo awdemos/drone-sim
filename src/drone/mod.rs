@@ -70,6 +70,11 @@ impl Plugin for DronePlugin {
             .add_systems(Update, controller::update_flight_mode.in_set(DroneSystemSet::FlightControl))
             .add_systems(Update, physics::apply_gravity.in_set(DroneSystemSet::Physics))
             .add_systems(Update, physics::update_physics.in_set(DroneSystemSet::Physics).after(physics::apply_gravity))
+            .add_systems(Update, physics::enforce_height_restrictions.in_set(DroneSystemSet::Physics).after(physics::update_physics))
+            .add_systems(Update, physics::check_battery_rtl.in_set(DroneSystemSet::FlightControl).after(controller::update_flight_mode))
+            .add_systems(Update, apply_swarm_formation.in_set(DroneSystemSet::FlightControl).after(controller::update_flight_mode))
+            .add_systems(Update, physics::check_airspace_violations.in_set(DroneSystemSet::Collision))
+            .add_systems(Update, physics::drone_collision_avoidance.in_set(DroneSystemSet::Collision))
             .add_systems(Update, physics::terrain_collision.in_set(DroneSystemSet::Collision))
             .add_systems(Update, physics::building_collision.in_set(DroneSystemSet::Collision))
             .add_systems(Update, physics::update_damage_effects.in_set(DroneSystemSet::Collision))
@@ -81,6 +86,8 @@ impl Plugin for DronePlugin {
             .add_systems(Update, visual::capture_visual_frames.in_set(DroneSystemSet::Visual))
             .add_systems(Update, camera::cleanup_camera_map.after(cleanup_destroyed_drones))
             .add_systems(Update, visual::cleanup_visual_buffer.after(cleanup_destroyed_drones))
+            .add_systems(Update, visual::screenshot_input.in_set(DroneSystemSet::Input))
+            .add_systems(Update, visual::save_screenshots.in_set(DroneSystemSet::Visual))
             .add_systems(Update, despawn_drone_entities.after(crate::handle_reload_world))
             .add_systems(Update, clear_drone_data.after(crate::handle_reload_world))
             .add_systems(Update, respawn_drones_on_reload.after(crate::world::reload_osm_data))
@@ -88,6 +95,7 @@ impl Plugin for DronePlugin {
             .add_event::<SpawnDroneEvent>()
             .add_event::<RenameDroneEvent>()
             .add_event::<ChangeSerialEvent>()
+            .add_event::<visual::ScreenshotEvent>()
             .add_systems(Update, apply_rename_events)
             .add_systems(Update, apply_serial_events)
             .add_systems(Update, update_flight_trails.in_set(DroneSystemSet::Physics))
@@ -229,9 +237,12 @@ pub struct EnvironmentSettings {
     pub wind_speed_ms: f32,
     pub wind_direction_deg: f32,
     pub turbulence: f32,
+    pub gust_factor: f32,
     pub sea_level_density: f32,
     pub density_scale_height_m: f32,
     pub sea_level_offset_m: f32,
+    pub rain_intensity: f32,
+    pub icing_factor: f32,
 }
 
 impl From<&crate::core::config::PhysicsConfig> for EnvironmentSettings {
@@ -240,9 +251,12 @@ impl From<&crate::core::config::PhysicsConfig> for EnvironmentSettings {
             wind_speed_ms: c.wind_speed_ms,
             wind_direction_deg: c.wind_direction_deg,
             turbulence: c.turbulence,
+            gust_factor: c.gust_factor,
             sea_level_density: c.sea_level_density,
             density_scale_height_m: c.density_scale_height_m,
             sea_level_offset_m: c.sea_level_offset_m,
+            rain_intensity: c.rain_intensity,
+            icing_factor: c.icing_factor,
         }
     }
 }
@@ -793,7 +807,7 @@ fn update_selection_rings(
 fn drone_picking(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<crate::OrbitCamera>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::camera::OrbitCamera>>,
     drone_query: Query<(Entity, &DroneIdentity, &Kinematics)>,
     mut fleet_registry: ResMut<FleetRegistry>,
     mut egui_ctx: bevy_egui::EguiContexts,
@@ -890,5 +904,57 @@ pub fn handle_spawn_drone_events(
         });
 
         fleet_registry.select_single(drone_id);
+    }
+}
+
+pub fn apply_swarm_formation(
+    ui_state: Res<crate::ui::UiPreferences>,
+    fleet_registry: Res<FleetRegistry>,
+    mut drones: Query<(&DroneIdentity, &mut Kinematics, &Health)>,
+) {
+    if !ui_state.formation_active || ui_state.formation_idx == 0 {
+        return;
+    }
+
+    let selected: Vec<_> = fleet_registry.selected().iter().copied().collect();
+    if selected.len() < 2 {
+        return;
+    }
+
+    let mut drone_data: Vec<_> = drones.iter_mut()
+        .filter(|(id, _, h)| selected.contains(&id.id) && h.is_operational)
+        .collect();
+
+    if drone_data.is_empty() {
+        return;
+    }
+
+    let leader_pos = drone_data[0].1.position;
+    let spread = ui_state.formation_spread;
+    let count = drone_data.len();
+
+    for (i, (_, kinematics, _)) in drone_data.iter_mut().enumerate().skip(1) {
+        let offset = match ui_state.formation_idx {
+            1 => Vec3::new((i as f32) * spread, 0.0, 0.0),
+            2 => {
+                let row = (i - 1) / 2 + 1;
+                let side = if (i - 1) % 2 == 0 { 1.0 } else { -1.0 };
+                Vec3::new(side * row as f32 * spread * 0.5, 0.0, -(row as f32) * spread)
+            }
+            3 => {
+                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                Vec3::new(side * (i as f32) * spread * 0.5, 0.0, -(i as f32) * spread)
+            }
+            4 => {
+                let angle = (i as f32) * std::f32::consts::TAU / (count as f32);
+                Vec3::new(angle.cos() * spread, 0.0, angle.sin() * spread)
+            }
+            _ => Vec3::ZERO,
+        };
+
+        let target = leader_pos + offset;
+        let error = target - kinematics.position;
+        let correction = error * 0.5;
+        kinematics.velocity += correction;
     }
 }

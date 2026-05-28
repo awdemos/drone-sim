@@ -15,6 +15,7 @@ pub struct DroneInputState {
     pub yaw: f32,
     pub mode_request: Option<FlightMode>,
     pub input_captured: bool,
+    pub emergency_stop: bool,
 }
 
 /// Process keyboard input
@@ -42,6 +43,7 @@ pub fn process_input(
     input_state.right = 0.0;
     input_state.up = 0.0;
     input_state.yaw = 0.0;
+    input_state.emergency_stop = false;
 
     if keyboard.pressed(KeyCode::KeyW) {
         input_state.forward += 1.0;
@@ -90,6 +92,9 @@ pub fn process_input(
     if keyboard.just_pressed(KeyCode::Digit7) {
         input_state.mode_request = Some(FlightMode::Land);
     }
+    if keyboard.just_pressed(KeyCode::KeyX) {
+        input_state.emergency_stop = true;
+    }
 }
 
 /// Update drone control based on mode and input
@@ -114,6 +119,22 @@ pub fn update_flight_mode(
         } else {
             fleet_registry.is_selected(identity.id)
         };
+
+        // Emergency stop: immediately kill thrust and switch to Land mode
+        if is_selected && input_state.emergency_stop {
+            let old_mode = flight_control.mode;
+            flight_control.mode = FlightMode::Land;
+            flight_control.thrust = 0.0;
+            flight_control.angular_thrust = Vec3::ZERO;
+            flight_control.target_velocity = Vec3::ZERO;
+            kinematics.velocity *= 0.5;
+            trace.record_event(SimEvent::ModeChanged {
+                drone_id: identity.id,
+                timestamp: SimTimestamp::now(),
+                old_mode,
+                new_mode: FlightMode::Land,
+            });
+        }
 
         // Check for mode change request (only for selected drone)
         if is_selected {
@@ -141,7 +162,9 @@ pub fn update_flight_mode(
             FlightMode::Manual => {
                 // Direct throttle control — user sets thrust via keyboard
                 if is_selected {
-                    flight_control.thrust = input_state.up.max(0.0) * fc.manual_thrust_scale + fc.manual_thrust_base;
+                    // Allow negative thrust for descent (Shift key); clamp to [-0.5, 0.95]
+                    flight_control.thrust = input_state.up * fc.manual_thrust_scale + fc.manual_thrust_base;
+                    flight_control.thrust = flight_control.thrust.clamp(-0.5, 0.95);
                     flight_control.angular_thrust = Vec3::new(
                         input_state.forward * 0.5,
                         input_state.yaw * 0.5,
@@ -171,7 +194,11 @@ pub fn update_flight_mode(
             }
             FlightMode::AltHold => {
                 // Hold altitude at 10m with PID around hover thrust
-                let target_alt = 10.0f32;
+                // User can nudge target altitude with Space/Shift for simultaneous vertical control
+                let mut target_alt = 10.0f32;
+                if is_selected {
+                    target_alt += input_state.up * 5.0;
+                }
                 let alt_error = target_alt - kinematics.position.y;
                 flight_control.thrust = hover_thrust + alt_error * fc.pid_gains.altitude_p;
                 flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
@@ -194,7 +221,11 @@ pub fn update_flight_mode(
             }
             FlightMode::Loiter => {
                 // Brake to zero velocity while holding altitude
-                let target_vel = Vec3::ZERO;
+                // User can nudge vertical velocity with Space/Shift for simultaneous control
+                let mut target_vel = Vec3::ZERO;
+                if is_selected {
+                    target_vel.y = input_state.up * fc.max_climb_rate_ms;
+                }
                 let vel_error = target_vel - kinematics.velocity;
                 let accel = vel_error * fc.pid_gains.velocity_p;
 
@@ -211,28 +242,44 @@ pub fn update_flight_mode(
                 );
             }
             FlightMode::Guided => {
-                // Fly in direction of keyboard input
-                if is_selected {
-                    let target_vel = Vec3::new(
+                // LLM can command all drones regardless of selection;
+                // keyboard input only affects selected drones.
+                let has_llm_vel = flight_control.target_velocity.length_squared() > 0.001;
+                let target_vel = if has_llm_vel {
+                    flight_control.target_velocity
+                } else if is_selected {
+                    Vec3::new(
                         input_state.right * fc.cruise_speed_ms,
                         input_state.up * fc.max_climb_rate_ms,
                         -input_state.forward * fc.cruise_speed_ms,
-                    );
-                    let vel_error = target_vel - kinematics.velocity;
-                    let accel = vel_error * fc.pid_gains.velocity_p;
+                    )
+                } else {
+                    Vec3::ZERO
+                };
 
-                    flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
-                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
+                let vel_error = target_vel - kinematics.velocity;
+                let accel = vel_error * fc.pid_gains.velocity_p;
 
-                    let (_, current_pitch, current_roll) =
-                        kinematics.orientation.to_euler(EulerRot::YXZ);
+                flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
-                    flight_control.angular_thrust = Vec3::new(
-                        (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
-                        input_state.yaw * 0.5,
-                        (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
-                    );
-                }
+                let (_, current_pitch, current_roll) =
+                    kinematics.orientation.to_euler(EulerRot::YXZ);
+
+                // Preserve LLM yaw command if present; otherwise use keyboard yaw
+                let yaw_input = if flight_control.angular_thrust.y.abs() > 0.001 {
+                    flight_control.angular_thrust.y
+                } else if is_selected {
+                    input_state.yaw * 0.5
+                } else {
+                    0.0
+                };
+
+                flight_control.angular_thrust = Vec3::new(
+                    (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
+                    yaw_input,
+                    (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
+                );
             }
             FlightMode::Auto => {
                 let wp_data = mission_state.mission.as_ref().and_then(|mission| {
