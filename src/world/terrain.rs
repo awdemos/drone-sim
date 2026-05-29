@@ -1,53 +1,26 @@
 use bevy::prelude::*;
 use crate::core::config::WorldConfig;
+use super::dem;
 
-/// Resource holding terrain mesh data
 #[derive(Resource, Clone)]
 pub struct TerrainData {
     pub heights: Vec<Vec<f32>>,
     pub size_m: f32,
     pub resolution: usize,
+    pub uses_real_elevation: bool,
 }
 
 impl TerrainData {
     pub fn generate(config: &WorldConfig) -> Self {
         let res = (config.terrain_resolution as usize).max(2);
         let size = config.terrain_size_m;
-        let mut heights = vec![vec![0.0f32; res]; res];
-
-        for z in 0..res {
-            for x in 0..res {
-                let nx = x as f32 / res as f32;
-                let nz = z as f32 / res as f32;
-                
-                let mut h = 0.0f32;
-                let mut amp = 40.0f32;
-                let mut freq = 1.0f32;
-                
-                for _ in 0..5 {
-                    h += simple_noise(nx * freq, nz * freq) * amp;
-                    amp *= 0.5;
-                    freq *= 2.2;
-                }
-
-                let hill_x = (nx * 3.0).sin() * 30.0;
-                let hill_z = (nz * 2.5).cos() * 25.0;
-                h += hill_x + hill_z;
-
-                let dx = nx - 0.5;
-                let dz = nz - 0.5;
-                let dist_from_center = (dx * dx + dz * dz).sqrt();
-                let flatten_factor = (dist_from_center * 2.5).min(1.0);
-                h = h * flatten_factor + 5.0;
-
-                heights[z][x] = h.max(0.0);
-            }
-        }
+        let (heights, uses_real) = dem::generate_heights(config);
 
         Self {
             heights,
             size_m: size,
             resolution: res,
+            uses_real_elevation: uses_real,
         }
     }
 
@@ -63,13 +36,6 @@ impl TerrainData {
     }
 }
 
-/// Simple value noise function
-fn simple_noise(x: f32, y: f32) -> f32 {
-    let n = x.sin() * 43758.5453 + y.cos() * 23421.675;
-    (n.fract() - 0.5) * 2.0
-}
-
-/// Insert terrain data resource without spawning mesh (used by satellite terrain)
 pub fn insert_terrain_data(
     mut commands: Commands,
     config: Res<WorldConfig>,

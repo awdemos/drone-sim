@@ -1,4 +1,5 @@
 pub mod terrain;
+pub mod dem;
 pub mod osm_loader;
 pub mod buildings;
 pub mod satellite_terrain;

@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use crate::core::types::{FlightMode, SimEvent, SimTimestamp};
 use crate::core::gps::GeoReference;
-use crate::drone::{DroneIdentity, Kinematics, FlightControl, MissionState, FleetRegistry};
+use crate::drone::{DroneIdentity, Kinematics, FlightControl, MissionState, FleetRegistry, PidState, PidAxis};
 use crate::drone::types::DroneTypeRegistry;
 use crate::eval::trace::TraceCollector;
 use crate::world::terrain::TerrainData;
@@ -101,26 +101,24 @@ pub fn process_input(
 pub fn update_flight_mode(
     time: Res<Time>,
     mut input_state: ResMut<DroneInputState>,
-    mut query: Query<(&DroneIdentity, &mut FlightControl, &mut Kinematics, &mut MissionState)>,
+    mut query: Query<(&DroneIdentity, &mut FlightControl, &mut Kinematics, &mut MissionState, &mut PidState)>,
     mut trace: ResMut<TraceCollector>,
     geo: Res<GeoReference>,
     terrain: Res<TerrainData>,
     registry: Res<DroneTypeRegistry>,
     fleet_registry: Res<FleetRegistry>,
 ) {
-    let _dt = time.delta_seconds();
+    let dt = time.delta_seconds();
 
-    // Process and clear mode change request
     let mode_request = input_state.mode_request.take();
 
-    for (identity, mut flight_control, mut kinematics, mut mission_state) in query.iter_mut() {
+    for (identity, mut flight_control, mut kinematics, mut mission_state, mut pid_state) in query.iter_mut() {
         let is_selected = if fleet_registry.selected().is_empty() {
-            true  // No explicit selection means all drones receive input
+            true
         } else {
             fleet_registry.is_selected(identity.id)
         };
 
-        // Emergency stop: immediately kill thrust and switch to Land mode
         if is_selected && input_state.emergency_stop {
             let old_mode = flight_control.mode;
             flight_control.mode = FlightMode::Land;
@@ -136,7 +134,6 @@ pub fn update_flight_mode(
             });
         }
 
-        // Check for mode change request (only for selected drone)
         if is_selected {
             if let Some(requested_mode) = mode_request {
                 if requested_mode != flight_control.mode {
@@ -154,15 +151,12 @@ pub fn update_flight_mode(
 
         let spec = registry.specs.get(&identity.drone_type).unwrap();
         let fc = &spec.flight_controller;
-
-        // Compute the thrust fraction needed to hover (mass * g / max_thrust)
+        let pid = &fc.pid_gains;
         let hover_thrust = compute_hover_thrust(spec.airframe.mass_kg, spec.engine.max_thrust_n);
 
         match flight_control.mode {
             FlightMode::Manual => {
-                // Direct throttle control — user sets thrust via keyboard
                 if is_selected {
-                    // Allow negative thrust for descent (Shift key); clamp to [-0.5, 0.95]
                     flight_control.thrust = input_state.up * fc.manual_thrust_scale + fc.manual_thrust_base;
                     flight_control.thrust = flight_control.thrust.clamp(-0.5, 0.95);
                     flight_control.angular_thrust = Vec3::new(
@@ -173,77 +167,98 @@ pub fn update_flight_mode(
                 }
             }
             FlightMode::Stabilize => {
-                // Self-leveling with throttle around hover point
                 if is_selected {
                     flight_control.thrust = input_state.up * fc.manual_thrust_scale + hover_thrust;
                     flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
                     let max_tilt = fc.max_tilt_angle_deg.to_radians();
-                    let target_pitch = input_state.forward * max_tilt;
-                    let target_roll = input_state.right * max_tilt;
-                    let target_yaw_rate = input_state.yaw * 1.0;
-
-                    let (_current_yaw, current_pitch, current_roll) =
-                        kinematics.orientation.to_euler(EulerRot::YXZ);
-
+                    let target_tilt = Vec3::new(
+                        input_state.forward * max_tilt,
+                        0.0,
+                        input_state.right * max_tilt,
+                    );
+                    let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                    let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                    let tilt_error = target_tilt - current_tilt;
+                    let attitude_output = pid_state.compute_vec3_pid(
+                        PidAxis::Attitude, tilt_error,
+                        pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
                     flight_control.angular_thrust = Vec3::new(
-                        (target_pitch - current_pitch) * fc.pid_gains.attitude_p,
-                        target_yaw_rate,
-                        (target_roll - current_roll) * fc.pid_gains.attitude_p,
+                        attitude_output.x,
+                        input_state.yaw * 1.0,
+                        attitude_output.z,
                     );
                 }
             }
             FlightMode::AltHold => {
-                // Hold altitude at 10m with PID around hover thrust
-                // User can nudge target altitude with Space/Shift for simultaneous vertical control
                 let mut target_alt = 10.0f32;
                 if is_selected {
                     target_alt += input_state.up * 5.0;
                 }
                 let alt_error = target_alt - kinematics.position.y;
-                flight_control.thrust = hover_thrust + alt_error * fc.pid_gains.altitude_p;
+                let alt_output = pid_state.compute_altitude_pid(
+                    alt_error,
+                    pid.altitude_p, pid.altitude_i, pid.altitude_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
+                );
+                flight_control.thrust = hover_thrust + alt_output;
                 flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
                 if is_selected {
                     let max_tilt = fc.max_tilt_angle_deg.to_radians();
-                    let target_pitch = input_state.forward * max_tilt;
-                    let target_roll = input_state.right * max_tilt;
-                    let target_yaw_rate = input_state.yaw * 0.5;
-
-                    let (_, current_pitch, current_roll) =
-                        kinematics.orientation.to_euler(EulerRot::YXZ);
-
+                    let target_tilt = Vec3::new(
+                        input_state.forward * max_tilt,
+                        0.0,
+                        input_state.right * max_tilt,
+                    );
+                    let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                    let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                    let tilt_error = target_tilt - current_tilt;
+                    let attitude_output = pid_state.compute_vec3_pid(
+                        PidAxis::Attitude, tilt_error,
+                        pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
                     flight_control.angular_thrust = Vec3::new(
-                        (target_pitch - current_pitch) * fc.pid_gains.attitude_p,
-                        target_yaw_rate,
-                        (target_roll - current_roll) * fc.pid_gains.attitude_p,
+                        attitude_output.x,
+                        input_state.yaw * 0.5,
+                        attitude_output.z,
                     );
                 }
             }
             FlightMode::Loiter => {
-                // Brake to zero velocity while holding altitude
-                // User can nudge vertical velocity with Space/Shift for simultaneous control
                 let mut target_vel = Vec3::ZERO;
                 if is_selected {
                     target_vel.y = input_state.up * fc.max_climb_rate_ms;
                 }
                 let vel_error = target_vel - kinematics.velocity;
-                let accel = vel_error * fc.pid_gains.velocity_p;
-
-                flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                let vel_output = pid_state.compute_vec3_pid(
+                    PidAxis::Velocity, vel_error,
+                    pid.velocity_p, pid.velocity_i, pid.velocity_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
+                );
+                let alt_error = -kinematics.velocity.y + target_vel.y;
+                let alt_output = pid_state.compute_altitude_pid(
+                    alt_error,
+                    pid.altitude_p, pid.altitude_i, pid.altitude_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
+                );
+                flight_control.thrust = hover_thrust + alt_output;
                 flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
-                let (_, current_pitch, current_roll) =
-                    kinematics.orientation.to_euler(EulerRot::YXZ);
-
-                flight_control.angular_thrust = Vec3::new(
-                    (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
-                    0.0,
-                    (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
+                let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                let target_tilt = Vec3::new(vel_output.z, 0.0, -vel_output.x);
+                let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                let tilt_error = target_tilt - current_tilt;
+                let attitude_output = pid_state.compute_vec3_pid(
+                    PidAxis::Attitude, tilt_error,
+                    pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
                 );
+                flight_control.angular_thrust = Vec3::new(attitude_output.x, 0.0, attitude_output.z);
             }
             FlightMode::Guided => {
-                // LLM can command all drones regardless of selection;
-                // keyboard input only affects selected drones.
                 let has_llm_vel = flight_control.target_velocity.length_squared() > 0.001;
                 let target_vel = if has_llm_vel {
                     flight_control.target_velocity
@@ -258,15 +273,30 @@ pub fn update_flight_mode(
                 };
 
                 let vel_error = target_vel - kinematics.velocity;
-                let accel = vel_error * fc.pid_gains.velocity_p;
-
-                flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                let vel_output = pid_state.compute_vec3_pid(
+                    PidAxis::Velocity, vel_error,
+                    pid.velocity_p, pid.velocity_i, pid.velocity_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
+                );
+                let alt_error = target_vel.y - kinematics.velocity.y;
+                let alt_output = pid_state.compute_altitude_pid(
+                    alt_error,
+                    pid.altitude_p, pid.altitude_i, pid.altitude_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
+                );
+                flight_control.thrust = hover_thrust + alt_output;
                 flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
-                let (_, current_pitch, current_roll) =
-                    kinematics.orientation.to_euler(EulerRot::YXZ);
+                let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                let target_tilt = Vec3::new(vel_output.z, 0.0, -vel_output.x);
+                let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                let tilt_error = target_tilt - current_tilt;
+                let attitude_output = pid_state.compute_vec3_pid(
+                    PidAxis::Attitude, tilt_error,
+                    pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                    pid.integral_limit, pid.derivative_filter_alpha, dt,
+                );
 
-                // Preserve LLM yaw command if present; otherwise use keyboard yaw
                 let yaw_input = if flight_control.angular_thrust.y.abs() > 0.001 {
                     flight_control.angular_thrust.y
                 } else if is_selected {
@@ -275,11 +305,7 @@ pub fn update_flight_mode(
                     0.0
                 };
 
-                flight_control.angular_thrust = Vec3::new(
-                    (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
-                    yaw_input,
-                    (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
-                );
+                flight_control.angular_thrust = Vec3::new(attitude_output.x, yaw_input, attitude_output.z);
             }
             FlightMode::Auto => {
                 let wp_data = mission_state.mission.as_ref().and_then(|mission| {
@@ -325,23 +351,33 @@ pub fn update_flight_mode(
                 } else {
                     let target_vel = delta.normalize_or_zero() * fc.cruise_speed_ms;
                     let vel_error = target_vel - kinematics.velocity;
-                    let accel = vel_error * fc.pid_gains.velocity_p;
-
-                    flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                    let vel_output = pid_state.compute_vec3_pid(
+                        PidAxis::Velocity, vel_error,
+                        pid.velocity_p, pid.velocity_i, pid.velocity_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
+                    let alt_error = target_vel.y - kinematics.velocity.y;
+                    let alt_output = pid_state.compute_altitude_pid(
+                        alt_error,
+                        pid.altitude_p, pid.altitude_i, pid.altitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
+                    flight_control.thrust = hover_thrust + alt_output;
                     flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
-                    let (_, current_pitch, current_roll) =
-                        kinematics.orientation.to_euler(EulerRot::YXZ);
-
-                    flight_control.angular_thrust = Vec3::new(
-                        (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
-                        0.0,
-                        (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
+                    let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                    let target_tilt = Vec3::new(vel_output.z, 0.0, -vel_output.x);
+                    let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                    let tilt_error = target_tilt - current_tilt;
+                    let attitude_output = pid_state.compute_vec3_pid(
+                        PidAxis::Attitude, tilt_error,
+                        pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
                     );
+                    flight_control.angular_thrust = Vec3::new(attitude_output.x, 0.0, attitude_output.z);
                 }
             }
             FlightMode::Rtl => {
-                // Return to launch (simplified: go to origin)
                 let target = Vec3::new(0.0, kinematics.position.y.max(fc.rtl_altitude_m), 0.0);
                 let delta = target - kinematics.position;
                 let dist = delta.length();
@@ -351,23 +387,33 @@ pub fn update_flight_mode(
                 } else {
                     let target_vel = delta.normalize_or_zero() * (fc.cruise_speed_ms * 1.2);
                     let vel_error = target_vel - kinematics.velocity;
-                    let accel = vel_error * fc.pid_gains.velocity_p;
-
-                    flight_control.thrust = hover_thrust + accel.y * fc.pid_gains.altitude_p;
+                    let vel_output = pid_state.compute_vec3_pid(
+                        PidAxis::Velocity, vel_error,
+                        pid.velocity_p, pid.velocity_i, pid.velocity_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
+                    let alt_error = target_vel.y - kinematics.velocity.y;
+                    let alt_output = pid_state.compute_altitude_pid(
+                        alt_error,
+                        pid.altitude_p, pid.altitude_i, pid.altitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
+                    flight_control.thrust = hover_thrust + alt_output;
                     flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
 
-                    let (_, current_pitch, current_roll) =
-                        kinematics.orientation.to_euler(EulerRot::YXZ);
-
-                    flight_control.angular_thrust = Vec3::new(
-                        (accel.z * fc.pid_gains.position_p - current_pitch) * fc.pid_gains.attitude_p,
-                        0.0,
-                        (-accel.x * fc.pid_gains.position_p - current_roll) * fc.pid_gains.attitude_p,
+                    let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                    let target_tilt = Vec3::new(vel_output.z, 0.0, -vel_output.x);
+                    let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                    let tilt_error = target_tilt - current_tilt;
+                    let attitude_output = pid_state.compute_vec3_pid(
+                        PidAxis::Attitude, tilt_error,
+                        pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
                     );
+                    flight_control.angular_thrust = Vec3::new(attitude_output.x, 0.0, attitude_output.z);
                 }
             }
             FlightMode::Land => {
-                // Descend to ground (gravity is applied separately for Land)
                 let ground = terrain.get_height_at_world(kinematics.position.x, kinematics.position.z);
                 let alt_agl = kinematics.position.y - ground;
 
@@ -377,13 +423,23 @@ pub fn update_flight_mode(
                     flight_control.angular_thrust = Vec3::ZERO;
                 } else {
                     let target_descent = (alt_agl * 0.5).min(fc.land_descent_rate_ms);
-                    flight_control.thrust = hover_thrust - target_descent * fc.pid_gains.altitude_p;
-                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
-                    flight_control.angular_thrust = Vec3::new(
-                        -kinematics.orientation.to_euler(EulerRot::YXZ).1 * fc.pid_gains.attitude_p,
-                        0.0,
-                        -kinematics.orientation.to_euler(EulerRot::YXZ).2 * fc.pid_gains.attitude_p,
+                    let alt_error = -target_descent;
+                    let alt_output = pid_state.compute_altitude_pid(
+                        alt_error,
+                        pid.altitude_p, pid.altitude_i, pid.altitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
                     );
+                    flight_control.thrust = hover_thrust + alt_output;
+                    flight_control.thrust = flight_control.thrust.clamp(0.05, 0.95);
+
+                    let (_, current_pitch, current_roll) = kinematics.orientation.to_euler(EulerRot::YXZ);
+                    let current_tilt = Vec3::new(current_pitch, 0.0, current_roll);
+                    let attitude_output = pid_state.compute_vec3_pid(
+                        PidAxis::Attitude, -current_tilt,
+                        pid.attitude_p, pid.attitude_i, pid.attitude_d,
+                        pid.integral_limit, pid.derivative_filter_alpha, dt,
+                    );
+                    flight_control.angular_thrust = Vec3::new(attitude_output.x, 0.0, attitude_output.z);
                 }
             }
         }

@@ -520,6 +520,7 @@ fn spawn_textured_terrain(
         heights,
         size_m: size,
         resolution: res,
+        uses_real_elevation: false,
     });
 
     println!("=== END TERRAIN DIAGNOSTICS ===");

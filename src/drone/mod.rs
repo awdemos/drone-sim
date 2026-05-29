@@ -3,6 +3,7 @@ pub mod camera;
 pub mod controller;
 pub mod visual;
 pub mod types;
+pub mod sensors;
 
 use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
@@ -503,6 +504,70 @@ pub struct FlightControl {
     pub angular_thrust: Vec3,
 }
 
+#[derive(Component, Clone, Debug, Default)]
+pub struct PidState {
+    pub attitude_integral: Vec3,
+    pub velocity_integral: Vec3,
+    pub position_integral: Vec3,
+    pub altitude_integral: f32,
+    pub prev_attitude_error: Vec3,
+    pub prev_velocity_error: Vec3,
+    pub prev_position_error: Vec3,
+    pub prev_altitude_error: f32,
+    pub filtered_attitude_derivative: Vec3,
+    pub filtered_velocity_derivative: Vec3,
+    pub filtered_position_derivative: Vec3,
+    pub filtered_altitude_derivative: f32,
+}
+
+impl PidState {
+    pub fn compute_vec3_pid(
+        &mut self,
+        axis: PidAxis,
+        error: Vec3,
+        kp: f32,
+        ki: f32,
+        kd: f32,
+        integral_limit: f32,
+        filter_alpha: f32,
+        dt: f32,
+    ) -> Vec3 {
+        let (integral, prev_err, filtered) = match axis {
+            PidAxis::Attitude => (&mut self.attitude_integral, &mut self.prev_attitude_error, &mut self.filtered_attitude_derivative),
+            PidAxis::Velocity => (&mut self.velocity_integral, &mut self.prev_velocity_error, &mut self.filtered_velocity_derivative),
+            PidAxis::Position => (&mut self.position_integral, &mut self.prev_position_error, &mut self.filtered_position_derivative),
+        };
+        *integral = (*integral + error * dt).clamp(-Vec3::splat(integral_limit), Vec3::splat(integral_limit));
+        let raw_deriv = if dt > 1e-6 { (error - *prev_err) / dt } else { Vec3::ZERO };
+        *filtered = *filtered * filter_alpha + raw_deriv * (1.0 - filter_alpha);
+        *prev_err = error;
+        kp * error + ki * *integral + kd * *filtered
+    }
+
+    pub fn compute_altitude_pid(
+        &mut self,
+        error: f32,
+        kp: f32,
+        ki: f32,
+        kd: f32,
+        integral_limit: f32,
+        filter_alpha: f32,
+        dt: f32,
+    ) -> f32 {
+        self.altitude_integral = (self.altitude_integral + error * dt).clamp(-integral_limit, integral_limit);
+        let raw_deriv = if dt > 1e-6 { (error - self.prev_altitude_error) / dt } else { 0.0 };
+        self.filtered_altitude_derivative = self.filtered_altitude_derivative * filter_alpha + raw_deriv * (1.0 - filter_alpha);
+        self.prev_altitude_error = error;
+        kp * error + ki * self.altitude_integral + kd * self.filtered_altitude_derivative
+    }
+}
+
+pub enum PidAxis {
+    Attitude,
+    Velocity,
+    Position,
+}
+
 /// Battery state
 #[derive(Component)]
 pub struct Battery {
@@ -578,6 +643,9 @@ pub fn spawn_drone_bundle(
             last_impact_velocity: 0.0,
         },
         FlightTrail::default(),
+        PidState::default(),
+        sensors::GpsNoise::default(),
+        sensors::SensorNoise::realistic(),
     )).id()
 }
 
