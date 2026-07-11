@@ -90,3 +90,13 @@ Known structural debt (refactor targets):
 - **LLM without key**: Prints warning, continues without LLM decisions
 - **Map tiles black/pixelated**: Check network, old cache may need clearing (`rm -rf data/tiles/`)
 - **No camera feeds**: Requires render-to-texture setup in `DronePlugin` render sub-app
+
+## Deployment
+
+No Dagger module or recognized deployment configuration was found.
+
+General redeploy process:
+
+1. Commit and push changes to the default branch.
+2. Trigger the relevant CI/CD pipeline or run the documented deploy command.
+3. If the project is served via GitHub Pages, the site redeploys automatically after the push.
